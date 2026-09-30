@@ -7,9 +7,9 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
-TOKEN = os.getenv("8685352650:AAGS495_9n2CEWkclEb4jC-9Hicl6RtGHgU")
-ADMIN_ID = 1055896268  
-
+TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 1055896268
+  
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
