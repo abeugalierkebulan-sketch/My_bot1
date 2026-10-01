@@ -11,7 +11,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 # 1. Получаем токен из переменных окружения Render
 TOKEN = os.getenv("BOT_TOKEN")
 
-bot = Bot(8685352650:AAGS495_9n2CEWkclEb4jC-9Hicl6RtGHgU)
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
