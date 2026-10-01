@@ -15,15 +15,14 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 
 # ID вашей группы
-CHANNEL_ID = -1004421978587 
+CHANNEL_ID = -1004421978587
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ТЕЛЕФОНА ---
 def clean_phone(phone: str) -> str:
-    """Форматирует номер в международный формат +7XXXXXXXXXX"""
     cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
         cleaned = '7' + cleaned[1:]
@@ -32,7 +31,7 @@ def clean_phone(phone: str) -> str:
     return f"+{cleaned}"
 
 
-# --- БАЗА ДАННЫХ (SQLite) ---
+# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -114,22 +113,6 @@ cancel_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-phone_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)],
-        [KeyboardButton(text="❌ Отмена")]
-    ],
-    resize_keyboard=True
-)
-
-location_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📍 Отправить мою геопозицию", request_location=True)],
-        [KeyboardButton(text="❌ Отмена")]
-    ],
-    resize_keyboard=True
-)
-
 confirm_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✅ Подтвердить заказ")],
@@ -139,32 +122,23 @@ confirm_keyboard = ReplyKeyboardMarkup(
 )
 
 
-# --- ОБРАБОТЧИКИ КОМАНД И РЕГИСТРАЦИИ ---
+# --- РЕГИСТРАЦИЯ И СТАРТ ---
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user = get_user(message.from_user.id)
     if user:
         name, phone = user
-        await message.answer(
-            f"С возвращением, {name}! 👋\nВыберите действие из меню ниже:",
-            reply_markup=main_menu
-        )
+        await message.answer(f"С возвращением, {name}! 👋", reply_markup=main_menu)
     else:
         await message.answer(
             f"Привет, {message.from_user.first_name}! 👋\n\n"
-            "Вы еще не зарегистрированы в сервисе такси.\n"
-            "Напишите команду /register чтобы пройти быструю регистрацию."
+            "Для работы с ботом пройдите регистрацию: напишите команду /register"
         )
 
 @dp.message(F.text == "❌ Отмена")
 @dp.message(Command("cancel"))
 async def cancel_handler(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Нечего отменять.")
-        return
-
     await state.clear()
     user = get_user(message.from_user.id)
     reply_kb = main_menu if user else ReplyKeyboardRemove()
@@ -173,34 +147,25 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 @dp.message(Command("register"))
 async def start_register(message: types.Message, state: FSMContext):
     await state.set_state(Registration.name)
-    await message.answer("Как вас зовут?", reply_markup=cancel_keyboard)
+    await message.answer("Введите ваше имя:", reply_markup=cancel_keyboard)
 
 @dp.message(Registration.name)
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(user_name=message.text)
     await state.set_state(Registration.phone)
-    await message.answer(
-        "Отлично! Нажмите кнопку ниже, чтобы поделиться номером телефона:",
-        reply_markup=phone_keyboard
-    )
+    await message.answer("Введите ваш номер телефона (например: +77071234567):", reply_markup=cancel_keyboard)
 
 @dp.message(Registration.phone)
 async def process_phone(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_name = user_data.get("user_name")
-
-    if message.contact:
-        user_phone = message.contact.phone_number
-    else:
-        user_phone = message.text
+    user_phone = message.text
 
     save_user(message.from_user.id, user_name, user_phone)
     await state.clear()
 
     await message.answer(
-        f"✅ Регистрация успешно завершена!\n\n"
-        f"👤 Имя: {user_name}\n"
-        f"📱 Телефон: {user_phone}",
+        f"✅ Регистрация успешна!\n👤 Имя: {user_name}\n📱 Телефон: {user_phone}",
         reply_markup=main_menu
     )
 
@@ -212,53 +177,32 @@ async def show_profile(message: types.Message):
     user = get_user(message.from_user.id)
     if user:
         name, phone = user
-        await message.answer(
-            f"📋 Ваш профиль:\n\n"
-            f"👤 Имя: {name}\n"
-            f"📱 Телефон: {phone}\n"
-            f"🆔 ID: {message.from_user.id}"
-        )
+        await message.answer(f"📋 Ваш профиль:\n\n👤 Имя: {name}\n📱 Телефон: {phone}")
     else:
         await message.answer("Вы не зарегистрированы. Напишите /register")
 
 @dp.message(F.text == "📞 Поддержка")
 async def show_support(message: types.Message):
-    await message.answer("Служба поддержки: @your_support_username\nТелефон: +7 (777) 000-00-00")
+    await message.answer("Служба поддержки: @support\nТелефон: +7 (777) 000-00-00")
 
 
-# --- СЦЕНАРИЙ ЗАКАЗА ТАКСИ ---
+# --- ЗАКАЗ ТАКСИ (ТОЛЬКО ТЕКСТОВЫЙ ВВОД) ---
 
 @dp.message(F.text == "🚕 Заказать такси")
 async def start_order(message: types.Message, state: FSMContext):
     user = get_user(message.from_user.id)
     if not user:
-        await message.answer("Сначала пройдите регистрацию с помощью команды /register")
+        await message.answer("Сначала пройдите регистрацию: /register")
         return
 
     await state.set_state(OrderTaxi.from_address)
-    await message.answer(
-        "🚕 Заказ такси\n\n"
-        "Откуда вас забрать?\n"
-        "Введите адрес текстом или нажмите кнопку «📍 Отправить мою геопозицию» ниже:",
-        reply_markup=location_keyboard
-    )
+    await message.answer("🚕 Откуда вас забрать? Напишите адрес:", reply_markup=cancel_keyboard)
 
 @dp.message(OrderTaxi.from_address)
 async def process_from_address(message: types.Message, state: FSMContext):
-    if message.location:
-        lat = message.location.latitude
-        lon = message.location.longitude
-        from_loc = f"Геопозиция: https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"
-    else:
-        from_loc = message.text
-
-    await state.update_data(from_address=from_loc)
+    await state.update_data(from_address=message.text)
     await state.set_state(OrderTaxi.to_address)
-
-    await message.answer(
-        "Куда едем?\nВведите адрес назначения текстом:",
-        reply_markup=cancel_keyboard
-    )
+    await message.answer("Куда едем? Напишите адрес назначения:", reply_markup=cancel_keyboard)
 
 @dp.message(OrderTaxi.to_address)
 async def process_to_address(message: types.Message, state: FSMContext):
@@ -273,11 +217,11 @@ async def process_to_address(message: types.Message, state: FSMContext):
     name, phone = user
 
     await message.answer(
-        f"🚕 Проверьте ваш заказ:\n\n"
+        f"🚕 Проверьте заказ:\n\n"
         f"👤 Пассажир: {name} ({phone})\n"
         f"🛫 Откуда: {from_addr}\n"
         f"🛬 Куда: {to_addr}\n\n"
-        f"Все верно?",
+        f"Подтвердить?",
         reply_markup=confirm_keyboard
     )
 
@@ -293,7 +237,7 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
 
     accept_button = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚕 Принять заказ", callback_data=f"accept_order_{order_id}")]
+            [InlineKeyboardButton(text="🚕 Принять заказ", callback_data=f"accept_{order_id}")]
         ]
     )
 
@@ -301,33 +245,22 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
         f"🚕 НОВЫЙ ЗАКАЗ #{order_id}\n\n"
         f"🛫 Откуда: {from_addr}\n"
         f"🛬 Куда: {to_addr}\n\n"
-        f"👇 Нажмите кнопку ниже, чтобы забрать заказ:"
+        f"Нажмите кнопку ниже, чтобы забрать заказ:"
     )
 
     try:
-        await bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=channel_order_text,
-            reply_markup=accept_button,
-            disable_web_page_preview=True
-        )
-        
-        await message.answer(
-            "🎉 Ваш заказ успешно отправлен водителям!\nКак только водитель примет заказ, вы получите уведомление.",
-            reply_markup=main_menu
-        )
+        await bot.send_message(chat_id=CHANNEL_ID, text=channel_order_text, reply_markup=accept_button)
+        await message.answer("🎉 Заказ отправлен водителям!", reply_markup=main_menu)
     except Exception as e:
-        await message.answer(
-            "⚠️ Ошибка при отправке заказа. Проверьте настройки группы.",
-            reply_markup=main_menu
-        )
+        await message.answer(" Ошибка отправки заказа в группу.", reply_markup=main_menu)
+        print(f"Ошибка отправки в группу: {e}")
 
 
-# --- ОБРАБОТКА НАЖАТИЯ КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
+# --- ОБРАБОТКА КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
 
-@dp.callback_query(F.data.startswith("accept_order_"))
+@dp.callback_query(F.data.startswith("accept_"))
 async def handle_accept_order(callback: types.CallbackQuery):
-    order_id = int(callback.data.split("_")[2])
+    order_id = int(callback.data.split("_")[1])
     driver_user_id = callback.from_user.id
 
     conn = sqlite3.connect("bot_database.db")
@@ -336,62 +269,52 @@ async def handle_accept_order(callback: types.CallbackQuery):
     order_data = cursor.fetchone()
 
     if not order_data:
-        await callback.answer("❌ Заказ не найден!", show_alert=True)
+        await callback.answer("Заказ не найден!", show_alert=True)
         conn.close()
         return
 
     passenger_id, from_addr, to_addr, status = order_data
 
     if status != 'active':
-        await callback.answer("⚠️ Этот заказ уже принят!", show_alert=True)
+        await callback.answer("Этот заказ уже принят!", show_alert=True)
         conn.close()
         return
 
-    # Обновляем статус заказа
+    # Фиксируем принятие
     cursor.execute("UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?", (driver_user_id, order_id))
     conn.commit()
     conn.close()
 
-    # Получаем данные водителя и пассажира
+    # Данные участников
     driver_info = get_user(driver_user_id)
-    driver_name, driver_phone = driver_info if driver_info else (callback.from_user.first_name or "Водитель", "Не указан")
+    driver_name = driver_info[0] if driver_info else (callback.from_user.first_name or "Водитель")
+    driver_phone = driver_info[1] if driver_info else "Не указан"
 
     passenger_info = get_user(passenger_id)
-    pass_name, pass_phone = passenger_info if passenger_info else ("Пассажир", "Не указан")
+    pass_name = passenger_info[0] if passenger_info else "Пассажир"
+    pass_phone = passenger_info[1] if passenger_info else "Не указан"
 
     clean_pass_phone = clean_phone(pass_phone)
     clean_driver_phone = clean_phone(driver_phone)
-    
-    wa_pass_phone = clean_pass_phone.replace("+", "")
-    wa_driver_phone = clean_driver_phone.replace("+", "")
 
-    await callback.answer("✅ Вы приняли заказ!")
+    await callback.answer("Вы приняли заказ!")
 
-    # 1. Обновляем сообщение в группе
-    order_accepted_text = (
-        f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n"
-        f"🛫 Откуда: {from_addr}\n"
-        f"🛬 Куда: {to_addr}\n\n"
-        f"🚕 Водитель: {driver_name}"
-    )
+    # 1. Обновление в группе
     try:
         await callback.message.edit_text(
-            text=order_accepted_text,
-            reply_markup=None,
-            disable_web_page_preview=True
+            text=f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n🛫 Откуда: {from_addr}\n🛬 Куда: {to_addr}\n\n🚕 Водитель: {driver_name}",
+            reply_markup=None
         )
     except Exception as e:
-        print(f"Ошибка группы: {e}")
+        print(f"Ошибка в группе: {e}")
 
-    # 2. Карточка ВОДИТЕЛЮ в личку (со всеми контактами клиента)
+    # 2. Сообщение ВОДИТЕЛЮ в ЛС
     try:
-        driver_contact_markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📞 Позвонить клиенту", url=f"tel:{clean_pass_phone}")],
-                [InlineKeyboardButton(text="💬 WhatsApp клиенту", url=f"https://wa.me/{wa_pass_phone}")]
-            ]
-        )
-        driver_card_text = (
+        driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📞 Позвонить клиенту", url=f"tel:{clean_pass_phone}")],
+            [InlineKeyboardButton(text="💬 WhatsApp клиенту", url=f"https://wa.me/{clean_pass_phone.replace('+', '')}")]
+        ])
+        driver_msg = (
             f"— ЖАҢА ТАПСЫРЫС —\n\n"
             f"Тапсырыс № {order_id}\n\n"
             f"👤 Клиент: {pass_name}\n"
@@ -400,40 +323,28 @@ async def handle_accept_order(callback: types.CallbackQuery):
             f"📱 Телефон: {clean_pass_phone}\n\n"
             f"Қабылдады: {driver_name}"
         )
-        await bot.send_message(
-            chat_id=driver_user_id,
-            text=driver_card_text,
-            reply_markup=driver_contact_markup,
-            disable_web_page_preview=True
-        )
+        await bot.send_message(chat_id=driver_user_id, text=driver_msg, reply_markup=driver_kb)
     except Exception as e:
-        print(f"Ошибка водителю: {e}")
+        print(f"Ошибка отправки водителю: {e}")
 
-    # 3. Карточка ПАССАЖИРУ в личку (со всеми контактами водителя)
+    # 3. Сообщение ПАССАЖИРУ в ЛС
     try:
-        passenger_contact_markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
-                [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{wa_driver_phone}")]
-            ]
-        )
-        passenger_card_text = (
+        passenger_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
+            [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{clean_driver_phone.replace('+', '')}")]
+        ])
+        passenger_msg = (
             f"🚖 Ваш заказ № {order_id} принят!\n\n"
             f"👤 Водитель: {driver_name}\n"
             f"📱 Телефон: {clean_driver_phone}\n\n"
-            f"Водитель свяжется с вами в ближайшее время."
+            f"Водитель свяжется с вами."
         )
-        await bot.send_message(
-            chat_id=passenger_id,
-            text=passenger_card_text,
-            reply_markup=passenger_contact_markup,
-            disable_web_page_preview=True
-        )
+        await bot.send_message(chat_id=passenger_id, text=passenger_msg, reply_markup=passenger_kb)
     except Exception as e:
-        print(f"Ошибка пассажиру: {e}")
+        print(f"Ошибка отправки пассажиру: {e}")
 
 
-# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
