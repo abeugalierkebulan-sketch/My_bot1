@@ -15,7 +15,7 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 
 # ID вашей группы
-CHANNEL_ID = -1004421978587
+CHANNEL_ID = -1004421078507 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -383,12 +383,15 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
         clean_pass_phone = clean_phone(pass_phone)
         clean_driver_phone = clean_phone(driver_phone)
+        
+        # Убираем знак плюс для рабочей ссылки WhatsApp
+        wa_pass_phone = clean_pass_phone.replace("+", "")
+        wa_driver_phone = clean_driver_phone.replace("+", "")
 
-        # 1. Всплывающее окно водителю
-        alert_text = f"✅ Вы приняли заказ #{order_id}!\n\n👤 Пассажир: {pass_name}\n📱 Тел: {pass_phone}"
-        await callback.answer(text=alert_text, show_alert=True)
+        # 1. Простое тихое подтверждение кнопки (без всплывающего окошка с текстом)
+        await callback.answer("Заказ принят!")
 
-        # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ
+        # 2. Обновляем пост в группе
         order_accepted_text = (
             f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n"
             f"🛫 Откуда: {from_addr}\n"
@@ -398,56 +401,62 @@ async def handle_accept_order(callback: types.CallbackQuery):
         try:
             await callback.message.edit_text(
                 text=order_accepted_text,
-                reply_markup=None,  # Убираем кнопку "Принять заказ"
+                reply_markup=None,
                 disable_web_page_preview=True
             )
         except Exception as e:
             print(f"Ошибка при изменении сообщения в группе: {e}")
 
-        # 3. Сообщение водителю в ЛС
+        # 3. Карточка ВОДИТЕЛЮ в личные сообщения (как на скриншоте)
         try:
             driver_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📞 Позвонить пассажиру", url=f"tel:{clean_pass_phone}")],
-                    [InlineKeyboardButton(text="✈️ Написать пассажиру в TG", url=f"https://t.me/{clean_pass_phone}")]
+                    [InlineKeyboardButton(text="📞 Позвонить", url=f"tel:{clean_pass_phone}")],
+                    [InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{wa_pass_phone}")]
                 ]
+            )
+            driver_card_text = (
+                f"— ЖАҢА ТАПСЫРЫС —\n\n"
+                f"Тапсырыс № {order_id}\n\n"
+                f"Қайдан: {from_addr}\n"
+                f"Қайда: {to_addr}\n"
+                f"Телефон: {clean_pass_phone}\n\n"
+                f"Қабылдады: {driver_name}"
             )
             await bot.send_message(
                 chat_id=driver_user_id,
-                text=(
-                    f"🎉 Вы приняли заказ #{order_id}!\n\n"
-                    f"👤 Пассажир: {pass_name}\n"
-                    f"📱 Телефон: {pass_phone}\n"
-                    f"🛫 Откуда: {from_addr}\n"
-                    f"🛬 Куда: {to_addr}"
-                ),
-                reply_markup=driver_contact_markup
+                text=driver_card_text,
+                reply_markup=driver_contact_markup,
+                disable_web_page_preview=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка отправки водителю в ЛС: {e}")
 
-        # 4. Сообщение пассажиру в ЛС
+        # 4. Карточка ПАССАЖИРУ в личные сообщения
         try:
             passenger_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
-                    [InlineKeyboardButton(text="✈️ Написать водителю в TG", url=f"https://t.me/{clean_driver_phone}")]
+                    [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{wa_driver_phone}")]
                 ]
+            )
+            passenger_card_text = (
+                f"🚖 Ваш заказ № {order_id} принят!\n\n"
+                f"👤 Водитель: {driver_name}\n"
+                f"📱 Телефон: {clean_driver_phone}\n\n"
+                f"Водитель свяжется с вами в ближайшее время."
             )
             await bot.send_message(
                 chat_id=passenger_id,
-                text=(
-                    f"🚖 Ваш заказ #{order_id} принят!\n\n"
-                    f"👤 Водитель: {driver_name}\n"
-                    f"📱 Телефон водителя: {driver_phone}"
-                ),
-                reply_markup=passenger_contact_markup
+                text=passenger_card_text,
+                reply_markup=passenger_contact_markup,
+                disable_web_page_preview=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка отправки пассажиру в ЛС: {e}")
 
     else:
-        await callback.answer("❌ К сожалению, этот заказ уже принял другой водитель!", show_alert=True)
+        await callback.answer("❌ Этот заказ уже принял другой водитель!", show_alert=True)
 
 
 # --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
@@ -473,3 +482,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
