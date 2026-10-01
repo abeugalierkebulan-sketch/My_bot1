@@ -359,11 +359,12 @@ async def handle_accept_order(callback: types.CallbackQuery):
     driver_user_id = callback.from_user.id
 
     driver_info = get_user(driver_user_id)
-    if not driver_info:
-        await callback.answer("⚠️ Чтобы принимать заказы, сначала зарегистрируйтесь у бота в ЛС!", show_alert=True)
-        return
-
-    driver_name, driver_phone = driver_info
+    # Если водителя нет в базе, используем данные его Telegram-профиля
+    if driver_info:
+        driver_name, driver_phone = driver_info
+    else:
+        driver_name = callback.from_user.first_name or "Водитель"
+        driver_phone = "Не указан"
 
     success = assign_order_to_driver(order_id, driver_user_id)
 
@@ -381,74 +382,40 @@ async def handle_accept_order(callback: types.CallbackQuery):
         clean_pass_phone = clean_phone(pass_phone)
         clean_driver_phone = clean_phone(driver_phone)
 
-        # 1. Обновляем пост в канале/группе
-        await callback.message.edit_text(
+        # Редактируем сообщение в канале, указывая контакты сразу для всех участников
+        order_accepted_text = (
             f"✅ **ЗАКАЗ #{order_id} ПРИНЯТ**\n\n"
             f"🛫 **Откуда:** {from_addr}\n"
             f"🛬 **Куда:** {to_addr}\n\n"
-            f"🚕 **Водитель:** {driver_name}",
+            f"🚕 **Водитель:** {driver_name}\n"
+            f"👤 **Пассажир:** {pass_name} (`{pass_phone}`)"
+        )
+
+        # Добавляем кнопки прямой связи прямо под постом в канале
+        buttons = []
+        if pass_phone != "Не указан":
+            buttons.append([InlineKeyboardButton(text="📞 Позвонить пассажиру", url=f"tel:{clean_pass_phone}")])
+            buttons.append([InlineKeyboardButton(text="✈️ Telegram пассажира", url=f"https://t.me/{clean_pass_phone}")])
+
+        await callback.message.edit_text(
+            text=order_accepted_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
         await callback.answer("Вы успешно приняли заказ!")
 
-        # 2. Кнопки связи для водителя
-        driver_contact_markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📞 Позвонить по сотовой связи", url=f"tel:{clean_pass_phone}")],
-                [InlineKeyboardButton(text="✈️ Написать/Позвонить в Telegram", url=f"https://t.me/{clean_pass_phone}")]
-            ]
-        )
-
-        # Пробуем отправить водителю в ЛС
+        # Пробуем уведомить пассажира в ЛС (если получится)
         try:
-            await bot.send_message(
-                chat_id=driver_user_id,
-                text=(
-                    f"🎉 **Вы приняли заказ #{order_id}!**\n\n"
-                    f"👤 **Пассажир:** {pass_name}\n"
-                    f"📱 **Телефон:** `{pass_phone}`\n"
-                    f"🛫 **Откуда:** {from_addr}\n"
-                    f"🛬 **Куда:** {to_addr}\n\n"
-                    f"👇 **Свяжитесь с пассажиром:**"
-                ),
-                reply_markup=driver_contact_markup,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-        except (TelegramForbiddenError, TelegramBadRequest):
-            # Если бот не может написать водителю в ЛС (водитель не нажал /start)
-            bot_info = await bot.get_me()
-            bot_username = bot_info.username
-            
-            start_bot_markup = InlineKeyboardMarkup(
+            passenger_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🤖 Перейти к боту и нажать Start", url=f"https://t.me/{bot_username}?start=1")]
+                    [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
+                    [InlineKeyboardButton(text="✈️ Telegram водителя", url=f"https://t.me/{clean_driver_phone}")]
                 ]
             )
-            
-            await callback.message.answer(
-                f"⚠️ Водитель {driver_name}, нажмите кнопку ниже, запустите бота и зарегистрируйтесь, чтобы получать данные пассажиров!",
-                reply_markup=start_bot_markup
-            )
-
-        # 3. Кнопки связи для пассажира
-        passenger_contact_markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📞 Позвонить по сотовой связи", url=f"tel:{clean_driver_phone}")],
-                [InlineKeyboardButton(text="✈️ Написать/Позвонить в Telegram", url=f"https://t.me/{clean_driver_phone}")]
-            ]
-        )
-
-        try:
             await bot.send_message(
                 chat_id=passenger_id,
-                text=(
-                    f"🚖 **Ваш заказ #{order_id} принят!**\n\n"
-                    f"👤 **Водитель:** {driver_name}\n"
-                    f"📱 **Телефон водителя:** `{driver_phone}`\n\n"
-                    f"👇 **Свяжитесь с водителем:**"
-                ),
+                text=f"🚖 **Ваш заказ #{order_id} принят!**\n\n👤 **Водитель:** {driver_name}",
                 reply_markup=passenger_contact_markup,
                 parse_mode="Markdown"
             )
@@ -457,6 +424,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     else:
         await callback.answer("❌ К сожалению, этот заказ уже принял другой водитель!", show_alert=True)
+
 
 
 # --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
