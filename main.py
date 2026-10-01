@@ -14,8 +14,8 @@ from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Укажите username вашей группы/канала с @ или её ID числом
-CHANNEL_ID = -1004421978587
+# ID вашей группы
+CHANNEL_ID = -1004421078507 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -23,7 +23,7 @@ dp = Dispatcher()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone(phone: str) -> str:
-    """Форматирует номер телефона в формат +7XXXXXXXXXX для корректных ссылок."""
+    """Форматирует номер телефона в международный формат +7XXXXXXXXXX."""
     cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
         cleaned = '7' + cleaned[1:]
@@ -243,11 +243,10 @@ async def show_profile(message: types.Message):
     if user:
         name, phone = user
         await message.answer(
-            f"📋 **Ваш профиль:**\n\n"
+            f"📋 Ваш профиль:\n\n"
             f"👤 Имя: {name}\n"
             f"📱 Телефон: {phone}\n"
-            f"🆔 ID: `{message.from_user.id}`",
-            parse_mode="Markdown"
+            f"🆔 ID: {message.from_user.id}"
         )
     else:
         await message.answer("Вы не зарегистрированы. Напишите /register")
@@ -268,11 +267,10 @@ async def start_order(message: types.Message, state: FSMContext):
 
     await state.set_state(OrderTaxi.from_address)
     await message.answer(
-        "🚕 **Заказ такси**\n\n"
+        "🚕 Заказ такси\n\n"
         "Откуда вас забрать?\n"
-        "Введите адрес текстом или нажмите кнопку **«📍 Отправить мою геопозицию»** ниже:",
-        reply_markup=location_keyboard,
-        parse_mode="Markdown"
+        "Введите адрес текстом или нажмите кнопку «📍 Отправить мою геопозицию» ниже:",
+        reply_markup=location_keyboard
     )
 
 @dp.message(OrderTaxi.from_address)
@@ -280,8 +278,7 @@ async def process_from_address(message: types.Message, state: FSMContext):
     if message.location:
         lat = message.location.latitude
         lon = message.location.longitude
-        map_link = f"https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"
-        from_loc = f"[📍 Геопозиция на карте]({map_link})"
+        from_loc = f"Геопозиция: https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"
     else:
         from_loc = message.text
 
@@ -306,14 +303,12 @@ async def process_to_address(message: types.Message, state: FSMContext):
     name, phone = user
 
     await message.answer(
-        f"🚕 **Проверьте ваш заказ:**\n\n"
-        f"👤 **Пассажир:** {name} ({phone})\n"
-        f"🛫 **Откуда:** {from_addr}\n"
-        f"🛬 **Куда:** {to_addr}\n\n"
+        f"🚕 Проверьте ваш заказ:\n\n"
+        f"👤 Пассажир: {name} ({phone})\n"
+        f"🛫 Откуда: {from_addr}\n"
+        f"🛬 Куда: {to_addr}\n\n"
         f"Все верно?",
-        reply_markup=confirm_keyboard,
-        parse_mode="Markdown",
-        disable_web_page_preview=True
+        reply_markup=confirm_keyboard
     )
 
 @dp.message(OrderTaxi.confirm, F.text == "✅ Подтвердить заказ")
@@ -333,10 +328,10 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
     )
 
     channel_order_text = (
-        f"🚕 **НОВЫЙ ЗАКАЗ #{order_id}**\n\n"
-        f"🛫 **Откуда:** {from_addr}\n"
-        f"🛬 **Куда:** {to_addr}\n\n"
-        f"👇 _Нажмите кнопку ниже, чтобы забрать заказ:_"
+        f"🚕 НОВЫЙ ЗАКАЗ #{order_id}\n\n"
+        f"🛫 Откуда: {from_addr}\n"
+        f"🛬 Куда: {to_addr}\n\n"
+        f"👇 Нажмите кнопку ниже, чтобы забрать заказ:"
     )
 
     try:
@@ -344,24 +339,22 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
             chat_id=CHANNEL_ID,
             text=channel_order_text,
             reply_markup=accept_button,
-            parse_mode="Markdown",
             disable_web_page_preview=True
         )
         
         await message.answer(
-            "🎉 **Ваш заказ успешно отправлен водителям!**\nКак только водитель примет заказ, вы получите уведомление.",
-            reply_markup=main_menu,
-            parse_mode="Markdown"
+            "🎉 Ваш заказ успешно отправлен водителям!\nКак только водитель примет заказ, вы получите уведомление.",
+            reply_markup=main_menu
         )
     except Exception as e:
         await message.answer(
-            "⚠️ **Ошибка при отправке заказа.** Проверьте, добавлен ли бот в администраторы канала/группы.",
+            "⚠️ Ошибка при отправке заказа. Проверьте настройки группы.",
             reply_markup=main_menu
         )
-        print(f"Ошибка отправки в канал: {e}")
+        print(f"Ошибка отправки в группу: {e}")
 
 
-# --- ОБРАБОТКА НАЖАТИЯ КНОПКИ «ПРИНЯТЬ ЗАКАЗ» В КАНАЛЕ ---
+# --- ОБРАБОТКА НАЖАТИЯ КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
 
 @dp.callback_query(F.data.startswith("accept_order_"))
 async def handle_accept_order(callback: types.CallbackQuery):
@@ -391,36 +384,27 @@ async def handle_accept_order(callback: types.CallbackQuery):
         clean_pass_phone = clean_phone(pass_phone)
         clean_driver_phone = clean_phone(driver_phone)
 
-        # Редактируем карточку заказа в канале/группе, добавляя контакты прямо под постом
+        # 1. Всплывающее окно водителю
+        alert_text = f"✅ Вы приняли заказ #{order_id}!\n\n👤 Пассажир: {pass_name}\n📱 Тел: {pass_phone}"
+        await callback.answer(text=alert_text, show_alert=True)
+
+        # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ
         order_accepted_text = (
-            f"✅ **ЗАКАЗ #{order_id} ПРИНЯТ**\n\n"
-            f"🛫 **Откуда:** {from_addr}\n"
-            f"🛬 **Куда:** {to_addr}\n\n"
-            f"🚕 **Водитель:** {driver_name}\n"
-            f"👤 **Пассажир:** {pass_name} (`{pass_phone}`)"
+            f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n"
+            f"🛫 Откуда: {from_addr}\n"
+            f"🛬 Куда: {to_addr}\n\n"
+            f"🚕 Водитель: {driver_name}"
         )
-
-        buttons = []
-        if pass_phone != "Не указан":
-            buttons.append([InlineKeyboardButton(text="📞 Позвонить пассажиру", url=f"tel:{clean_pass_phone}")])
-            buttons.append([InlineKeyboardButton(text="✈️ Написать пассажиру в TG", url=f"https://t.me/{clean_pass_phone}")])
-
         try:
             await callback.message.edit_text(
                 text=order_accepted_text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
-                parse_mode="Markdown",
+                reply_markup=None,  # Убираем кнопку "Принять заказ"
                 disable_web_page_preview=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка при изменении сообщения в группе: {e}")
 
-        if result == "success":
-            await callback.answer("🎉 Вы успешно приняли заказ!", show_alert=True)
-        else:
-            await callback.answer("ℹ️ Вы уже приняли этот заказ ранее!", show_alert=True)
-
-        # Отправляем водителю контакты в ЛС (если он запускал бота)
+        # 3. Сообщение водителю в ЛС
         try:
             driver_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -431,19 +415,18 @@ async def handle_accept_order(callback: types.CallbackQuery):
             await bot.send_message(
                 chat_id=driver_user_id,
                 text=(
-                    f"🎉 **Вы приняли заказ #{order_id}!**\n\n"
-                    f"👤 **Пассажир:** {pass_name}\n"
-                    f"📱 **Телефон:** `{pass_phone}`\n"
-                    f"🛫 **Откуда:** {from_addr}\n"
-                    f"🛬 **Куда:** {to_addr}"
+                    f"🎉 Вы приняли заказ #{order_id}!\n\n"
+                    f"👤 Пассажир: {pass_name}\n"
+                    f"📱 Телефон: {pass_phone}\n"
+                    f"🛫 Откуда: {from_addr}\n"
+                    f"🛬 Куда: {to_addr}"
                 ),
-                reply_markup=driver_contact_markup,
-                parse_mode="Markdown"
+                reply_markup=driver_contact_markup
             )
         except Exception:
             pass
 
-        # Отправляем пассажиру контакты водителя в ЛС
+        # 4. Сообщение пассажиру в ЛС
         try:
             passenger_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -454,12 +437,11 @@ async def handle_accept_order(callback: types.CallbackQuery):
             await bot.send_message(
                 chat_id=passenger_id,
                 text=(
-                    f"🚖 **Ваш заказ #{order_id} принят!**\n\n"
-                    f"👤 **Водитель:** {driver_name}\n"
-                    f"📱 **Телефон водителя:** `{driver_phone}`"
+                    f"🚖 Ваш заказ #{order_id} принят!\n\n"
+                    f"👤 Водитель: {driver_name}\n"
+                    f"📱 Телефон водителя: {driver_phone}"
                 ),
-                reply_markup=passenger_contact_markup,
-                parse_mode="Markdown"
+                reply_markup=passenger_contact_markup
             )
         except Exception:
             pass
