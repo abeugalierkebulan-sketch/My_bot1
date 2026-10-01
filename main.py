@@ -14,14 +14,13 @@ from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ID вашей группы
-CHANNEL_ID = -1004421978587
+# Ваш действующий ID канала/группы
+CHANNEL_ID = -1004421978587 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ТЕЛЕФОНА ---
 def clean_phone(phone: str) -> str:
     cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
@@ -31,7 +30,6 @@ def clean_phone(phone: str) -> str:
     return f"+{cleaned}"
 
 
-# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -88,7 +86,6 @@ def create_order(passenger_id: int, from_addr: str, to_addr: str):
     return order_id
 
 
-# --- FSM (СОСТОЯНИЯ) ---
 class Registration(StatesGroup):
     name = State()
     phone = State()
@@ -99,7 +96,6 @@ class OrderTaxi(StatesGroup):
     confirm = State()
 
 
-# --- КЛАВИАТУРЫ ---
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🚕 Заказать такси")],
@@ -122,8 +118,6 @@ confirm_keyboard = ReplyKeyboardMarkup(
 )
 
 
-# --- РЕГИСТРАЦИЯ И СТАРТ ---
-
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user = get_user(message.from_user.id)
@@ -131,10 +125,7 @@ async def start_handler(message: types.Message):
         name, phone = user
         await message.answer(f"С возвращением, {name}! 👋", reply_markup=main_menu)
     else:
-        await message.answer(
-            f"Привет, {message.from_user.first_name}! 👋\n\n"
-            "Для работы с ботом пройдите регистрацию: напишите команду /register"
-        )
+        await message.answer("Для работы с ботом пройдите регистрацию: напишите /register")
 
 @dp.message(F.text == "❌ Отмена")
 @dp.message(Command("cancel"))
@@ -170,8 +161,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
 
 
-# --- ПРОФИЛЬ И ПОДДЕРЖКА ---
-
 @dp.message(F.text == "👤 Мой профиль")
 async def show_profile(message: types.Message):
     user = get_user(message.from_user.id)
@@ -183,10 +172,8 @@ async def show_profile(message: types.Message):
 
 @dp.message(F.text == "📞 Поддержка")
 async def show_support(message: types.Message):
-    await message.answer("Служба поддержки: @support\nТелефон: +7 (777) 000-00-00")
+    await message.answer("Служба поддержки: @support")
 
-
-# --- ЗАКАЗ ТАКСИ (ТОЛЬКО ТЕКСТОВЫЙ ВВОД) ---
 
 @dp.message(F.text == "🚕 Заказать такси")
 async def start_order(message: types.Message, state: FSMContext):
@@ -252,11 +239,10 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
         await bot.send_message(chat_id=CHANNEL_ID, text=channel_order_text, reply_markup=accept_button)
         await message.answer("🎉 Заказ отправлен водителям!", reply_markup=main_menu)
     except Exception as e:
-        await message.answer(" Ошибка отправки заказа в группу.", reply_markup=main_menu)
-        print(f"Ошибка отправки в группу: {e}")
+        await message.answer("Ошибка отправки заказа в группу.", reply_markup=main_menu)
 
 
-# --- ОБРАБОТКА КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
+# --- НАЖАТИЕ КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
 
 @dp.callback_query(F.data.startswith("accept_"))
 async def handle_accept_order(callback: types.CallbackQuery):
@@ -265,7 +251,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT passenger_id, from_addr, to_addr, status FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT passenger_id, from_addr, to_addr FROM orders WHERE id = ?", (order_id,))
     order_data = cursor.fetchone()
 
     if not order_data:
@@ -273,19 +259,14 @@ async def handle_accept_order(callback: types.CallbackQuery):
         conn.close()
         return
 
-    passenger_id, from_addr, to_addr, status = order_data
+    passenger_id, from_addr, to_addr = order_data
 
-    if status != 'active':
-        await callback.answer("Этот заказ уже принят!", show_alert=True)
-        conn.close()
-        return
-
-    # Фиксируем принятие
+    # Записываем водителя
     cursor.execute("UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?", (driver_user_id, order_id))
     conn.commit()
     conn.close()
 
-    # Данные участников
+    # Данные водителя и пассажира
     driver_info = get_user(driver_user_id)
     driver_name = driver_info[0] if driver_info else (callback.from_user.first_name or "Водитель")
     driver_phone = driver_info[1] if driver_info else "Не указан"
@@ -299,7 +280,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     await callback.answer("Вы приняли заказ!")
 
-    # 1. Обновление в группе
+    # 1. Изменяем текст в группе
     try:
         await callback.message.edit_text(
             text=f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n🛫 Откуда: {from_addr}\n🛬 Куда: {to_addr}\n\n🚕 Водитель: {driver_name}",
@@ -308,7 +289,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
     except Exception as e:
         print(f"Ошибка в группе: {e}")
 
-    # 2. Сообщение ВОДИТЕЛЮ в ЛС
+    # 2. Карточка ВОДИТЕЛЮ в ЛС
     try:
         driver_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📞 Позвонить клиенту", url=f"tel:{clean_pass_phone}")],
@@ -325,9 +306,9 @@ async def handle_accept_order(callback: types.CallbackQuery):
         )
         await bot.send_message(chat_id=driver_user_id, text=driver_msg, reply_markup=driver_kb)
     except Exception as e:
-        print(f"Ошибка отправки водителю: {e}")
+        print(f"ОШИБКА ОТПРАВКИ ВОДИТЕЛЮ: {e}")
 
-    # 3. Сообщение ПАССАЖИРУ в ЛС
+    # 3. Карточка ПАССАЖИРУ в ЛС
     try:
         passenger_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
@@ -341,10 +322,9 @@ async def handle_accept_order(callback: types.CallbackQuery):
         )
         await bot.send_message(chat_id=passenger_id, text=passenger_msg, reply_markup=passenger_kb)
     except Exception as e:
-        print(f"Ошибка отправки пассажиру: {e}")
+        print(f"ОШИБКА ОТПРАВКИ ПАССАЖИРУ: {e}")
 
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -358,8 +338,6 @@ async def start_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-
-# --- ЗАПУСК ---
 async def main():
     init_db()
     await start_web_server()
