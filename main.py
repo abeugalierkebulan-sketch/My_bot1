@@ -23,7 +23,7 @@ dp = Dispatcher()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone(phone: str) -> str:
-    """Форматирует номер телефона в международный формат +7XXXXXXXXXX."""
+    """Форматирует номер в международный формат +7XXXXXXXXXX"""
     cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
         cleaned = '7' + cleaned[1:]
@@ -87,31 +87,6 @@ def create_order(passenger_id: int, from_addr: str, to_addr: str):
     conn.commit()
     conn.close()
     return order_id
-
-def assign_order_to_driver(order_id: int, driver_id: int):
-    conn = sqlite3.connect("bot_database.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT status, driver_id FROM orders WHERE id = ?", (order_id,))
-    order = cursor.fetchone()
-    
-    if not order:
-        conn.close()
-        return "not_found"
-        
-    status, current_driver = order
-    if status == 'active':
-        cursor.execute("""
-            UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?
-        """, (driver_id, order_id))
-        conn.commit()
-        conn.close()
-        return "success"
-    elif current_driver == driver_id:
-        conn.close()
-        return "already_yours"
-    else:
-        conn.close()
-        return "taken_by_other"
 
 
 # --- FSM (СОСТОЯНИЯ) ---
@@ -197,11 +172,6 @@ async def cancel_handler(message: types.Message, state: FSMContext):
 
 @dp.message(Command("register"))
 async def start_register(message: types.Message, state: FSMContext):
-    user = get_user(message.from_user.id)
-    if user:
-        await message.answer("Вы уже зарегистрированы!", reply_markup=main_menu)
-        return
-
     await state.set_state(Registration.name)
     await message.answer("Как вас зовут?", reply_markup=cancel_keyboard)
 
@@ -351,7 +321,6 @@ async def process_confirm_order(message: types.Message, state: FSMContext):
             "⚠️ Ошибка при отправке заказа. Проверьте настройки группы.",
             reply_markup=main_menu
         )
-        print(f"Ошибка отправки в группу: {e}")
 
 
 # --- ОБРАБОТКА НАЖАТИЯ КНОПКИ «ПРИНЯТЬ ЗАКАЗ» ---
@@ -361,102 +330,107 @@ async def handle_accept_order(callback: types.CallbackQuery):
     order_id = int(callback.data.split("_")[2])
     driver_user_id = callback.from_user.id
 
-    driver_info = get_user(driver_user_id)
-    if driver_info:
-        driver_name, driver_phone = driver_info
-    else:
-        driver_name = callback.from_user.first_name or "Водитель"
-        driver_phone = "Не указан"
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT passenger_id, from_addr, to_addr, status FROM orders WHERE id = ?", (order_id,))
+    order_data = cursor.fetchone()
 
-    result = assign_order_to_driver(order_id, driver_user_id)
-
-    if result in ["success", "already_yours"]:
-        conn = sqlite3.connect("bot_database.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT passenger_id, from_addr, to_addr FROM orders WHERE id = ?", (order_id,))
-        order_data = cursor.fetchone()
+    if not order_data:
+        await callback.answer("❌ Заказ не найден!", show_alert=True)
         conn.close()
+        return
 
-        passenger_id, from_addr, to_addr = order_data
-        passenger_info = get_user(passenger_id)
-        pass_name, pass_phone = passenger_info if passenger_info else ("Пассажир", "Не указан")
+    passenger_id, from_addr, to_addr, status = order_data
 
-        clean_pass_phone = clean_phone(pass_phone)
-        clean_driver_phone = clean_phone(driver_phone)
-        
-        # Убираем знак плюс для рабочей ссылки WhatsApp
-        wa_pass_phone = clean_pass_phone.replace("+", "")
-        wa_driver_phone = clean_driver_phone.replace("+", "")
+    if status != 'active':
+        await callback.answer("⚠️ Этот заказ уже принят!", show_alert=True)
+        conn.close()
+        return
 
-        # 1. Простое тихое подтверждение кнопки (без всплывающего окошка с текстом)
-        await callback.answer("Заказ принят!")
+    # Обновляем статус заказа
+    cursor.execute("UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?", (driver_user_id, order_id))
+    conn.commit()
+    conn.close()
 
-        # 2. Обновляем пост в группе
-        order_accepted_text = (
-            f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n"
-            f"🛫 Откуда: {from_addr}\n"
-            f"🛬 Куда: {to_addr}\n\n"
-            f"🚕 Водитель: {driver_name}"
+    # Получаем данные водителя и пассажира
+    driver_info = get_user(driver_user_id)
+    driver_name, driver_phone = driver_info if driver_info else (callback.from_user.first_name or "Водитель", "Не указан")
+
+    passenger_info = get_user(passenger_id)
+    pass_name, pass_phone = passenger_info if passenger_info else ("Пассажир", "Не указан")
+
+    clean_pass_phone = clean_phone(pass_phone)
+    clean_driver_phone = clean_phone(driver_phone)
+    
+    wa_pass_phone = clean_pass_phone.replace("+", "")
+    wa_driver_phone = clean_driver_phone.replace("+", "")
+
+    await callback.answer("✅ Вы приняли заказ!")
+
+    # 1. Обновляем сообщение в группе
+    order_accepted_text = (
+        f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n"
+        f"🛫 Откуда: {from_addr}\n"
+        f"🛬 Куда: {to_addr}\n\n"
+        f"🚕 Водитель: {driver_name}"
+    )
+    try:
+        await callback.message.edit_text(
+            text=order_accepted_text,
+            reply_markup=None,
+            disable_web_page_preview=True
         )
-        try:
-            await callback.message.edit_text(
-                text=order_accepted_text,
-                reply_markup=None,
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            print(f"Ошибка при изменении сообщения в группе: {e}")
+    except Exception as e:
+        print(f"Ошибка группы: {e}")
 
-        # 3. Карточка ВОДИТЕЛЮ в личные сообщения (как на скриншоте)
-        try:
-            driver_contact_markup = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📞 Позвонить", url=f"tel:{clean_pass_phone}")],
-                    [InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{wa_pass_phone}")]
-                ]
-            )
-            driver_card_text = (
-                f"— ЖАҢА ТАПСЫРЫС —\n\n"
-                f"Тапсырыс № {order_id}\n\n"
-                f"Қайдан: {from_addr}\n"
-                f"Қайда: {to_addr}\n"
-                f"Телефон: {clean_pass_phone}\n\n"
-                f"Қабылдады: {driver_name}"
-            )
-            await bot.send_message(
-                chat_id=driver_user_id,
-                text=driver_card_text,
-                reply_markup=driver_contact_markup,
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            print(f"Ошибка отправки водителю в ЛС: {e}")
+    # 2. Карточка ВОДИТЕЛЮ в личку (со всеми контактами клиента)
+    try:
+        driver_contact_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📞 Позвонить клиенту", url=f"tel:{clean_pass_phone}")],
+                [InlineKeyboardButton(text="💬 WhatsApp клиенту", url=f"https://wa.me/{wa_pass_phone}")]
+            ]
+        )
+        driver_card_text = (
+            f"— ЖАҢА ТАПСЫРЫС —\n\n"
+            f"Тапсырыс № {order_id}\n\n"
+            f"👤 Клиент: {pass_name}\n"
+            f"🛫 Қайдан: {from_addr}\n"
+            f"🛬 Қайда: {to_addr}\n"
+            f"📱 Телефон: {clean_pass_phone}\n\n"
+            f"Қабылдады: {driver_name}"
+        )
+        await bot.send_message(
+            chat_id=driver_user_id,
+            text=driver_card_text,
+            reply_markup=driver_contact_markup,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Ошибка водителю: {e}")
 
-        # 4. Карточка ПАССАЖИРУ в личные сообщения
-        try:
-            passenger_contact_markup = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
-                    [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{wa_driver_phone}")]
-                ]
-            )
-            passenger_card_text = (
-                f"🚖 Ваш заказ № {order_id} принят!\n\n"
-                f"👤 Водитель: {driver_name}\n"
-                f"📱 Телефон: {clean_driver_phone}\n\n"
-                f"Водитель свяжется с вами в ближайшее время."
-            )
-            await bot.send_message(
-                chat_id=passenger_id,
-                text=passenger_card_text,
-                reply_markup=passenger_contact_markup,
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            print(f"Ошибка отправки пассажиру в ЛС: {e}")
-
-    else:
-        await callback.answer("❌ Этот заказ уже принял другой водитель!", show_alert=True)
+    # 3. Карточка ПАССАЖИРУ в личку (со всеми контактами водителя)
+    try:
+        passenger_contact_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
+                [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{wa_driver_phone}")]
+            ]
+        )
+        passenger_card_text = (
+            f"🚖 Ваш заказ № {order_id} принят!\n\n"
+            f"👤 Водитель: {driver_name}\n"
+            f"📱 Телефон: {clean_driver_phone}\n\n"
+            f"Водитель свяжется с вами в ближайшее время."
+        )
+        await bot.send_message(
+            chat_id=passenger_id,
+            text=passenger_card_text,
+            reply_markup=passenger_contact_markup,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Ошибка пассажиру: {e}")
 
 
 # --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
@@ -482,4 +456,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
