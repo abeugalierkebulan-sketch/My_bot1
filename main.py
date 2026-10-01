@@ -14,7 +14,7 @@ from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Ваш действующий ID канала/группы
+# Ваш ID канала
 CHANNEL_ID = -1004421978587 
 
 bot = Bot(token=TOKEN)
@@ -261,7 +261,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     passenger_id, from_addr, to_addr = order_data
 
-    # Записываем водителя
+    # Обновляем статус
     cursor.execute("UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?", (driver_user_id, order_id))
     conn.commit()
     conn.close()
@@ -277,52 +277,51 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     clean_pass_phone = clean_phone(pass_phone)
     clean_driver_phone = clean_phone(driver_phone)
+    wa_pass = clean_pass_phone.replace("+", "")
+    wa_driver = clean_driver_phone.replace("+", "")
 
     await callback.answer("Вы приняли заказ!")
 
-    # 1. Изменяем текст в группе
+    # 1. Изменяем сообщение в группе
     try:
         await callback.message.edit_text(
             text=f"✅ ЗАКАЗ #{order_id} ПРИНЯТ\n\n🛫 Откуда: {from_addr}\n🛬 Куда: {to_addr}\n\n🚕 Водитель: {driver_name}",
             reply_markup=None
         )
     except Exception as e:
-        print(f"Ошибка в группе: {e}")
+        print(f"Ошибка обновления группы: {e}")
 
     # 2. Карточка ВОДИТЕЛЮ в ЛС
     try:
         driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Позвонить клиенту", url=f"tel:{clean_pass_phone}")],
-            [InlineKeyboardButton(text="💬 WhatsApp клиенту", url=f"https://wa.me/{clean_pass_phone.replace('+', '')}")]
+            [InlineKeyboardButton(text="💬 WhatsApp клиенту", url=f"https://wa.me/{wa_pass}")]
         ])
         driver_msg = (
-            f"— ЖАҢА ТАПСЫРЫС —\n\n"
-            f"Тапсырыс № {order_id}\n\n"
+            f"— НОВЫЙ ЗАКАЗ #{order_id} —\n\n"
             f"👤 Клиент: {pass_name}\n"
-            f"🛫 Қайдан: {from_addr}\n"
-            f"🛬 Қайда: {to_addr}\n"
+            f"🛫 Откуда: {from_addr}\n"
+            f"🛬 Куда: {to_addr}\n"
             f"📱 Телефон: {clean_pass_phone}\n\n"
-            f"Қабылдады: {driver_name}"
+            f"Заказ принят вами ({driver_name})."
         )
         await bot.send_message(chat_id=driver_user_id, text=driver_msg, reply_markup=driver_kb)
     except Exception as e:
-        print(f"ОШИБКА ОТПРАВКИ ВОДИТЕЛЮ: {e}")
+        print(f"Ошибка отправки водителю: {e}")
 
     # 3. Карточка ПАССАЖИРУ в ЛС
     try:
         passenger_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
-            [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{clean_driver_phone.replace('+', '')}")]
+            [InlineKeyboardButton(text="💬 WhatsApp водителю", url=f"https://wa.me/{wa_driver}")]
         ])
         passenger_msg = (
-            f"🚖 Ваш заказ № {order_id} принят!\n\n"
+            f"🚖 Ваш заказ #{order_id} принят!\n\n"
             f"👤 Водитель: {driver_name}\n"
             f"📱 Телефон: {clean_driver_phone}\n\n"
-            f"Водитель свяжется с вами."
+            f"Водитель скоро свяжется с вами."
         )
         await bot.send_message(chat_id=passenger_id, text=passenger_msg, reply_markup=passenger_kb)
     except Exception as e:
-        print(f"ОШИБКА ОТПРАВКИ ПАССАЖИРУ: {e}")
+        print(f"Ошибка отправки пассажиру: {e}")
 
 
 async def handle_ping(request):
