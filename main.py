@@ -10,21 +10,21 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Укажите username вашей группы/канала с @ (например "@Alakol_taxi_orders") или её ID числом
-CHANNEL_ID = "@taxi_zakazy_test1" 
+# Укажите username вашей группы/канала с @ (например "@Alakol_taxi_orders") или её ID
+CHANNEL_ID = "@your_channel_username" 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
-# --- ВПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone(phone: str) -> str:
-    """Форматирует номер телефона в формат +7XXXXXXXXXX для корректных ссылок."""
-    cleaned = ''.join(filter(str.isdigit, phone))
+    cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
         cleaned = '7' + cleaned[1:]
     elif not cleaned.startswith('7'):
@@ -360,7 +360,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     driver_info = get_user(driver_user_id)
     if not driver_info:
-        await callback.answer("⚠️ Чтобы принимать заказы, сначала запустите бота и зарегистрируйтесь!", show_alert=True)
+        await callback.answer("⚠️ Чтобы принимать заказы, сначала зарегистрируйтесь у бота в ЛС!", show_alert=True)
         return
 
     driver_name, driver_phone = driver_info
@@ -378,11 +378,10 @@ async def handle_accept_order(callback: types.CallbackQuery):
         passenger_info = get_user(passenger_id)
         pass_name, pass_phone = passenger_info if passenger_info else ("Пассажир", "Не указан")
 
-        # Форматируем телефоны для ссылок
         clean_pass_phone = clean_phone(pass_phone)
         clean_driver_phone = clean_phone(driver_phone)
 
-        # 1. Обновляем карточку в группе
+        # 1. Обновляем пост в канале/группе
         await callback.message.edit_text(
             f"✅ **ЗАКАЗ #{order_id} ПРИНЯТ**\n\n"
             f"🛫 **Откуда:** {from_addr}\n"
@@ -393,7 +392,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
         )
         await callback.answer("Вы успешно приняли заказ!")
 
-        # 2. Кнопки связи с пассажиром (для водителя)
+        # 2. Кнопки связи для водителя
         driver_contact_markup = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📞 Позвонить по сотовой связи", url=f"tel:{clean_pass_phone}")],
@@ -401,7 +400,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
             ]
         )
 
-        # Отправляем водителю контакты
+        # Пробуем отправить водителю в ЛС
         try:
             await bot.send_message(
                 chat_id=driver_user_id,
@@ -417,10 +416,23 @@ async def handle_accept_order(callback: types.CallbackQuery):
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
-        except Exception:
-            await callback.message.answer(f"⚠️ Водитель {driver_name}, пожалуйста, напишите боту в личные сообщения, чтобы получать контакты пассажиров!")
+        except (TelegramForbiddenError, TelegramBadRequest):
+            # Если бот не может написать водителю в ЛС (водитель не нажал /start)
+            bot_info = await bot.get_me()
+            bot_username = bot_info.username
+            
+            start_bot_markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🤖 Перейти к боту и нажать Start", url=f"https://t.me/{bot_username}?start=1")]
+                ]
+            )
+            
+            await callback.message.answer(
+                f"⚠️ Водитель {driver_name}, нажмите кнопку ниже, запустите бота и зарегистрируйтесь, чтобы получать данные пассажиров!",
+                reply_markup=start_bot_markup
+            )
 
-        # 3. Кнопки связи с водителем (для пассажира)
+        # 3. Кнопки связи для пассажира
         passenger_contact_markup = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📞 Позвонить по сотовой связи", url=f"tel:{clean_driver_phone}")],
@@ -428,7 +440,6 @@ async def handle_accept_order(callback: types.CallbackQuery):
             ]
         )
 
-        # Отправляем пассажиру контакты водителя
         try:
             await bot.send_message(
                 chat_id=passenger_id,
