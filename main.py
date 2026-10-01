@@ -8,17 +8,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
-# 1. Получаем токен из переменных окружения Render
+# 1. Получаем токен из переменных окружения
 TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
+
+# --- БАЗА ДАННЫХ (SQLite) ---
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    # Создаем таблицу, если ее нет
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,20 +42,29 @@ def save_user(user_id: int, name: str, phone: str):
     conn.close()
 
 
-# --- FSM (АНКЕТА РЕГИСТРАЦИИ) ---
+# --- FSM (АНКЕТА) ---
 class Registration(StatesGroup):
     name = State()   # Шаг 1: Имя
     phone = State()  # Шаг 2: Телефон
 
 
-# --- КНОПКА ОТМЕНЫ ---
+# --- КЛАВИАТУРЫ ---
 cancel_keyboard = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="❌ Отмена")]],
     resize_keyboard=True
 )
 
+# Клавиатура с кнопкой запроса номера
+phone_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)],
+        [KeyboardButton(text="❌ Отмена")]
+    ],
+    resize_keyboard=True
+)
 
-# --- ОБРАБОТЧИКИ КОМАНД ---
+
+# --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
@@ -64,7 +73,7 @@ async def start_handler(message: types.Message):
         "Чтобы пройти регистрацию, напиши команду /register"
     )
 
-# Кнопка или команда "Отмена" для сброса анкеты
+# Отмена анкеты
 @dp.message(F.text == "❌ Отмена")
 @dp.message(Command("cancel"))
 async def cancel_handler(message: types.Message, state: FSMContext):
@@ -89,20 +98,30 @@ async def start_register(message: types.Message, state: FSMContext):
 async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(user_name=message.text)
     await state.set_state(Registration.phone)
-    await message.answer("Отлично! Теперь введите ваш номер телефона:", reply_markup=cancel_keyboard)
+    
+    # Показываем клавиатуру с кнопкой "Поделиться номером"
+    await message.answer(
+        "Отлично! Нажмите кнопку ниже, чтобы поделиться номером телефона:",
+        reply_markup=phone_keyboard
+    )
 
 
-# Шаг 2: Ловим телефон и сохраняем всё в SQLite
+# Шаг 2: Ловим телефон (как через кнопку контакта, так и обычным текстом)
 @dp.message(Registration.phone)
 async def process_phone(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_name = user_data.get("user_name")
-    user_phone = message.text
 
-    # Сохраняем в базу данных SQLite!
+    # Проверяем: прислал ли пользователь контакт по кнопке или написал текстом
+    if message.contact:
+        user_phone = message.contact.phone_number
+    else:
+        user_phone = message.text
+
+    # Сохраняем в SQLite
     save_user(message.from_user.id, user_name, user_phone)
 
-    # Очищаем анкуту (выходим из FSM)
+    # Завершаем анкету
     await state.clear()
 
     await message.answer(
@@ -116,7 +135,7 @@ async def process_phone(message: types.Message, state: FSMContext):
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    init_db()  # Инициализируем базу при старте
+    init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
