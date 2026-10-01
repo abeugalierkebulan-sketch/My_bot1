@@ -15,7 +15,7 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 
 # ID вашей группы
-CHANNEL_ID = -1004421078507 
+CHANNEL_ID = -1004421978587 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
