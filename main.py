@@ -15,7 +15,7 @@ from aiohttp import web
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Укажите username вашей группы/канала с @ (например "@Alakol_taxi_orders")
-CHANNEL_ID = "@your_channel_username" 
+CHANNEL_ID = "@taxi_zakazy_test1" 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
