@@ -10,13 +10,12 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Укажите username вашей группы/канала с @ (например "@Alakol_taxi_orders") или её ID
-CHANNEL_ID = "@taxi_zakazy_test1" 
+# Укажите username вашей группы/канала с @ или её ID числом
+CHANNEL_ID = "@your_channel_username" 
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -24,6 +23,7 @@ dp = Dispatcher()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone(phone: str) -> str:
+    """Форматирует номер телефона в формат +7XXXXXXXXXX для корректных ссылок."""
     cleaned = ''.join(filter(str.isdigit, str(phone)))
     if cleaned.startswith('8'):
         cleaned = '7' + cleaned[1:]
@@ -91,17 +91,27 @@ def create_order(passenger_id: int, from_addr: str, to_addr: str):
 def assign_order_to_driver(order_id: int, driver_id: int):
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT status FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT status, driver_id FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
-    if order and order[0] == 'active':
+    
+    if not order:
+        conn.close()
+        return "not_found"
+        
+    status, current_driver = order
+    if status == 'active':
         cursor.execute("""
             UPDATE orders SET driver_id = ?, status = 'accepted' WHERE id = ?
         """, (driver_id, order_id))
         conn.commit()
         conn.close()
-        return True
-    conn.close()
-    return False
+        return "success"
+    elif current_driver == driver_id:
+        conn.close()
+        return "already_yours"
+    else:
+        conn.close()
+        return "taken_by_other"
 
 
 # --- FSM (СОСТОЯНИЯ) ---
@@ -359,16 +369,15 @@ async def handle_accept_order(callback: types.CallbackQuery):
     driver_user_id = callback.from_user.id
 
     driver_info = get_user(driver_user_id)
-    # Если водителя нет в базе, используем данные его Telegram-профиля
     if driver_info:
         driver_name, driver_phone = driver_info
     else:
         driver_name = callback.from_user.first_name or "Водитель"
         driver_phone = "Не указан"
 
-    success = assign_order_to_driver(order_id, driver_user_id)
+    result = assign_order_to_driver(order_id, driver_user_id)
 
-    if success:
+    if result in ["success", "already_yours"]:
         conn = sqlite3.connect("bot_database.db")
         cursor = conn.cursor()
         cursor.execute("SELECT passenger_id, from_addr, to_addr FROM orders WHERE id = ?", (order_id,))
@@ -382,7 +391,7 @@ async def handle_accept_order(callback: types.CallbackQuery):
         clean_pass_phone = clean_phone(pass_phone)
         clean_driver_phone = clean_phone(driver_phone)
 
-        # Редактируем сообщение в канале, указывая контакты сразу для всех участников
+        # Редактируем карточку заказа в канале/группе, добавляя контакты прямо под постом
         order_accepted_text = (
             f"✅ **ЗАКАЗ #{order_id} ПРИНЯТ**\n\n"
             f"🛫 **Откуда:** {from_addr}\n"
@@ -391,31 +400,64 @@ async def handle_accept_order(callback: types.CallbackQuery):
             f"👤 **Пассажир:** {pass_name} (`{pass_phone}`)"
         )
 
-        # Добавляем кнопки прямой связи прямо под постом в канале
         buttons = []
         if pass_phone != "Не указан":
             buttons.append([InlineKeyboardButton(text="📞 Позвонить пассажиру", url=f"tel:{clean_pass_phone}")])
-            buttons.append([InlineKeyboardButton(text="✈️ Telegram пассажира", url=f"https://t.me/{clean_pass_phone}")])
+            buttons.append([InlineKeyboardButton(text="✈️ Написать пассажиру в TG", url=f"https://t.me/{clean_pass_phone}")])
 
-        await callback.message.edit_text(
-            text=order_accepted_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-        await callback.answer("Вы успешно приняли заказ!")
+        try:
+            await callback.message.edit_text(
+                text=order_accepted_text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+        except Exception:
+            pass
 
-        # Пробуем уведомить пассажира в ЛС (если получится)
+        if result == "success":
+            await callback.answer("🎉 Вы успешно приняли заказ!", show_alert=True)
+        else:
+            await callback.answer("ℹ️ Вы уже приняли этот заказ ранее!", show_alert=True)
+
+        # Отправляем водителю контакты в ЛС (если он запускал бота)
+        try:
+            driver_contact_markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="📞 Позвонить пассажиру", url=f"tel:{clean_pass_phone}")],
+                    [InlineKeyboardButton(text="✈️ Написать пассажиру в TG", url=f"https://t.me/{clean_pass_phone}")]
+                ]
+            )
+            await bot.send_message(
+                chat_id=driver_user_id,
+                text=(
+                    f"🎉 **Вы приняли заказ #{order_id}!**\n\n"
+                    f"👤 **Пассажир:** {pass_name}\n"
+                    f"📱 **Телефон:** `{pass_phone}`\n"
+                    f"🛫 **Откуда:** {from_addr}\n"
+                    f"🛬 **Куда:** {to_addr}"
+                ),
+                reply_markup=driver_contact_markup,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+        # Отправляем пассажиру контакты водителя в ЛС
         try:
             passenger_contact_markup = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="📞 Позвонить водителю", url=f"tel:{clean_driver_phone}")],
-                    [InlineKeyboardButton(text="✈️ Telegram водителя", url=f"https://t.me/{clean_driver_phone}")]
+                    [InlineKeyboardButton(text="✈️ Написать водителю в TG", url=f"https://t.me/{clean_driver_phone}")]
                 ]
             )
             await bot.send_message(
                 chat_id=passenger_id,
-                text=f"🚖 **Ваш заказ #{order_id} принят!**\n\n👤 **Водитель:** {driver_name}",
+                text=(
+                    f"🚖 **Ваш заказ #{order_id} принят!**\n\n"
+                    f"👤 **Водитель:** {driver_name}\n"
+                    f"📱 **Телефон водителя:** `{driver_phone}`"
+                ),
                 reply_markup=passenger_contact_markup,
                 parse_mode="Markdown"
             )
@@ -424,7 +466,6 @@ async def handle_accept_order(callback: types.CallbackQuery):
 
     else:
         await callback.answer("❌ К сожалению, этот заказ уже принял другой водитель!", show_alert=True)
-
 
 
 # --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
