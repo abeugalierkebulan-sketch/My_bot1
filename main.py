@@ -13,8 +13,10 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO)
 
 API_TOKEN = os.getenv("BOT_TOKEN")
-CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "0"))
-INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "0"))
+
+# Точные ID супергрупп
+CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "-1004350443552"))
+INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "-1003756709241"))
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -112,7 +114,18 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
     conn.close()
 
     if driver:
-        await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Топқа өтінім жіберсеңіз, бот автоматты түрде қабылдайды.", parse_mode="HTML")
+        # Если водитель уже зарегистрирован, сразу выдаём ссылки
+        try:
+            city_link = await bot.export_chat_invite_link(CITY_GROUP_ID)
+            intercity_link = await bot.export_chat_invite_link(INTERCITY_GROUP_ID)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏙 Қала ішіндегі топқа қосылу", url=city_link)],
+                [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
+            ])
+            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Топтарға өту үшін төмендегі сілтемелерді басыңыз:", reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Ошибка получения ссылок: {e}")
+            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Жұмыс топтарына қосылыңыз.", parse_mode="HTML")
         return
 
     await state.set_state(DriverRegister.full_name)
@@ -145,7 +158,26 @@ async def process_driver_car(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
     await state.clear()
-    await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b> Енді жұмыс тобына қосылу өтінішін жіберіңіз!", reply_markup=main_menu(), parse_mode="HTML")
+
+    # Генерация пригласительных ссылок
+    try:
+        city_link = await bot.export_chat_invite_link(CITY_GROUP_ID)
+        intercity_link = await bot.export_chat_invite_link(INTERCITY_GROUP_ID)
+        
+        group_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏙 Қала ішіндегі топқа қосылу", url=city_link)],
+            [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
+        ])
+        
+        await message.answer(
+            "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\n"
+            "Енді тапсырыстарды көру үшін төмендегі батырмалар арқылы жұмыс топтарына қосылыңыз 👇",
+            reply_markup=group_kb,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось сгенерировать ссылки: {e}")
+        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b> Енді жұмыс топтарына қосылу өтінішін жіберіңіз!", reply_markup=main_menu(), parse_mode="HTML")
 
 # --- АВТО-ОДОБРЕНИЕ ЗАЯВОК В ГРУППУ ---
 @dp.chat_join_request()
@@ -338,7 +370,6 @@ async def handle_ping(request):
     return web.Response(text="Bot is live!")
 
 async def main():
-    # Запускаем dummy веб-сервер для порта на Render Web Service
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -347,7 +378,6 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    # Сбрасываем старые вебхуки для предотвращения конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
