@@ -82,6 +82,13 @@ class OrderIntercity(StatesGroup):
     seats = State()
     price = State()
 
+class OrderDelivery(StatesGroup):
+    delivery_type = State() # город или межгород
+    from_loc = State()
+    to_loc = State()
+    item_info = State()
+    price = State()
+
 class DriverRegister(StatesGroup):
     full_name = State()
     phone = State()
@@ -92,7 +99,17 @@ def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
-            [KeyboardButton(text="🚖 Жүргізуші болу"), KeyboardButton(text="📞 Қолдау қызметі")]
+            [KeyboardButton(text="📦 Жеткізу (Доставка)"), KeyboardButton(text="🚖 Жүргізуші болу")],
+            [KeyboardButton(text="📞 Қолдау қызметі")]
+        ],
+        resize_keyboard=True
+    )
+
+def delivery_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
+            [KeyboardButton(text="❌ Бас тарту")]
         ],
         resize_keyboard=True
     )
@@ -179,7 +196,6 @@ async def process_client_phone(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-    # СРАЗУ ПОСЛЕ ВВОДА НОМЕРА ВЫДАЕМ ГЛАВНОЕ МЕНЮ
     await message.answer(
         "✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇",
         reply_markup=main_menu(),
@@ -387,6 +403,76 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
 
+# --- 3. ЗАКАЗ ДОСТАВКИ (С ВЫБОРОМ ГОРОД / МЕЖГОРОД) ---
+@dp.message(F.text == "📦 Жеткізу (Доставка)")
+async def start_delivery_order(message: types.Message, state: FSMContext):
+    if not await is_client_registered(message.from_user.id):
+        await state.set_state(ClientRegister.full_name)
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
+        return
+
+    await state.set_state(OrderDelivery.delivery_type)
+    await message.answer("📦 <b>Жеткізу түрін таңдаңыз:</b>", reply_markup=delivery_menu(), parse_mode="HTML")
+
+@dp.message(OrderDelivery.delivery_type, F.text.in_({"🏙 Қала ішінде", "🛣 Қалааралық (Межгород)"}))
+async def process_delivery_type(message: types.Message, state: FSMContext):
+    dtype = "city" if message.text == "🏙 Қала ішінде" else "intercity"
+    await state.update_data(delivery_type=dtype)
+    await state.set_state(OrderDelivery.from_loc)
+    await message.answer("📍 <b>Затты қай жерден алып кету керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
+
+@dp.message(OrderDelivery.from_loc)
+async def process_delivery_from(message: types.Message, state: FSMContext):
+    await state.update_data(from_loc=message.text)
+    await state.set_state(OrderDelivery.to_loc)
+    await message.answer("🏁 <b>Қай жерге жеткізіп беру керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
+
+@dp.message(OrderDelivery.to_loc)
+async def process_delivery_to(message: types.Message, state: FSMContext):
+    await state.update_data(to_loc=message.text)
+    await state.set_state(OrderDelivery.item_info)
+    await message.answer("📦 <b>Не жеткізу керек?</b> (Мысалы: Документ, сәлемдеме, қорап т.б.):", reply_markup=cancel_menu(), parse_mode="HTML")
+
+@dp.message(OrderDelivery.item_info)
+async def process_delivery_item(message: types.Message, state: FSMContext):
+    await state.update_data(item_info=message.text)
+    await state.set_state(OrderDelivery.price)
+    await message.answer("💰 <b>Жеткізу ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+
+@dp.message(OrderDelivery.price)
+async def process_delivery_price(message: types.Message, state: FSMContext):
+    price = message.text
+    data = await state.get_data()
+    dtype = data.get('delivery_type', 'city')
+    
+    conn = sqlite3.connect("joldas_taxi.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
+    client = cursor.fetchone()
+    phone = client[0] if client else "Көрсетілмеген"
+
+    cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, seats, price, phone, status) VALUES (?, 'delivery', ?, ?, ?, ?, ?, 'new')",
+                   (message.from_user.id, data['from_loc'], data['to_loc'], data['item_info'], price, phone))
+    order_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(), parse_mode="HTML")
+
+    type_title = "ҚАЛА ІШІНДЕ" if dtype == "city" else "ҚАЛААРАЛЫҚ"
+    target_group_id = CITY_GROUP_ID if dtype == "city" else INTERCITY_GROUP_ID
+
+    card_text = (
+        f"🚨 <b>ЖОЛДАС ТАКСИ: ЖЕТКІЗУ ({type_title}) №{order_id}</b>\n\n"
+        f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
+        f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
+        f"📦 <b>Зат:</b> {data['item_info']}\n"
+        f"💰 <b>Жеткізу ақысы:</b> {price}\n"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
+    await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
+
 # --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_order(callback_query: types.CallbackQuery):
@@ -450,6 +536,8 @@ async def accept_order(callback_query: types.CallbackQuery):
     )
     if order_type == 'intercity':
         driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
+    elif order_type == 'delivery':
+        driver_pm_text += f"📦 <b>Зат:</b> {seats}\n"
     
     driver_pm_text += (
         f"💰 <b>Жол ақысы:</b> {price}\n"
