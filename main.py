@@ -14,7 +14,6 @@ logging.basicConfig(level=logging.INFO)
 
 API_TOKEN = os.getenv("BOT_TOKEN")
 
-# Точные ID супергрупп
 CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "-1004350443552"))
 INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "-1003756709241"))
 
@@ -336,46 +335,53 @@ async def accept_order(callback_query: types.CallbackQuery):
         conn.close()
         return
 
-    # Проверяем, может ли бот отправить личное сообщение водителю
-    clean_phone = ''.join(filter(str.isdigit, str(order[5])))
-    if not clean_phone.startswith("7") and not clean_phone.startswith("8") and len(clean_phone) == 10:
-        clean_phone = "7" + clean_phone
-
-    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_phone}"), 
-         InlineKeyboardButton(text="📞 Қоңырау шалу", url=f"tel:+{clean_phone}")]
-    ])
-
-    order_details_for_driver = (
-        f"✅ <b>Тапсырыс №{order_id} сізге берілді!</b>\n\n"
-        f"📍 <b>Маршрут:</b> {order[2]} ➔ {order[3]}\n"
-        f"💰 <b>Бағасы:</b> {order[4]}\n"
-        f"📞 <b>Клиент нөмірі:</b> <code>+{clean_phone}</code>"
-    )
-
-    try:
-        # Отправляем контакт клиенту водителю в ЛС
-        await bot.send_message(chat_id=driver.id, text=order_details_for_driver, reply_markup=driver_kb, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Не удалось отправить ЛС водителю: {e}")
-        await callback_query.answer("❌ Қате! Алдымен ботқа жекеге өтіп (ЛС) /start басыңыз!", show_alert=True)
-        conn.close()
-        return
-
-    # Обновляем статус заказа в БД
+    # Фиксируем принятие заказа в базе сразу
     cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()
 
-    client_id = order[0]
+    client_id, _, from_loc, to_loc, price, raw_phone = order[0], order[1], order[2], order[3], order[4], order[5]
 
-    # Обновляем карточку заказа в супергруппе
-    await callback_query.message.edit_text(
-        f"{callback_query.message.text}\n\n✅ <b>ТАПСЫРЫС АЛЫНДЫ!</b>\nЖүргізуші: {driver.full_name}", 
-        parse_mode="HTML"
+    # Приводим телефон к чистому виду
+    digits = ''.join(filter(str.isdigit, str(raw_phone)))
+    if len(digits) == 10:
+        clean_phone = "7" + digits
+    elif len(digits) == 11 and digits.startswith("8"):
+        clean_phone = "7" + digits[1:]
+    else:
+        clean_phone = digits
+
+    # Кнопка связи
+    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_phone}")]
+    ])
+
+    order_details_for_driver = (
+        f"✅ <b>Тапсырыс №{order_id} қабылданды!</b>\n\n"
+        f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
+        f"💰 <b>Бағасы:</b> {price}\n"
+        f"📞 <b>Клиент нөмірі:</b> <code>+{clean_phone}</code>"
     )
 
-    # Уведомляем клиента
+    # 1. Обновляем карточку в супергруппе
+    try:
+        await callback_query.message.edit_text(
+            f"{callback_query.message.text}\n\n✅ <b>ТАПСЫРЫС АЛЫНДЫ!</b>\nЖүргізуші: {driver.full_name}", 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка при обновлении карточки: {e}")
+
+    # 2. Отправляем детали заказа водителю
+    try:
+        await bot.send_message(chat_id=driver.id, text=order_details_for_driver, reply_markup=driver_kb, parse_mode="HTML")
+        await callback_query.answer("Тапсырыс қабылданды! Деректер ЛС-ке жіберілді.", show_alert=True)
+    except Exception as e:
+        logging.error(f"Не удалось отправить ЛС водителю {driver.id}: {e}")
+        # Если Telegram всё же сбоит при отправке, показываем всплывашку с номером телефона ПРЯМО НА ЭКРАНЕ ГРУППЫ:
+        await callback_query.answer(f"Тапсырыс қабылданды! Клиент нөмірі: +{clean_phone}", show_alert=True)
+
+    # 3. Уведомляем клиента
     try:
         await bot.send_message(
             chat_id=client_id, 
@@ -384,8 +390,6 @@ async def accept_order(callback_query: types.CallbackQuery):
         )
     except Exception as e:
         logging.error(f"Не удалось отправить ЛС клиенту: {e}")
-
-    await callback_query.answer("Тапсырыс қабылданды! Деректер ЛС-ке (жекеге) жіберілді.", show_alert=True)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА И ЗАПУСК ---
 async def handle_ping(request):
