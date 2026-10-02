@@ -84,10 +84,10 @@ class OrderIntercity(StatesGroup):
 
 class OrderDelivery(StatesGroup):
     delivery_type = State() # город или межгород
-    from_loc = State()
-    to_loc = State()
-    item_info = State()
-    price = State()
+    item_info = State()     # что именно доставить
+    from_loc = State()      # откуда забрать
+    to_loc = State()        # куда доставить
+    price = State()         # цена
 
 class DriverRegister(StatesGroup):
     full_name = State()
@@ -414,31 +414,36 @@ async def start_delivery_order(message: types.Message, state: FSMContext):
     await state.set_state(OrderDelivery.delivery_type)
     await message.answer("📦 <b>Жеткізу түрін таңдаңыз:</b>", reply_markup=delivery_menu(), parse_mode="HTML")
 
+# Шаг 1: Выбор типа доставки (город / межгород)
 @dp.message(OrderDelivery.delivery_type, F.text.in_({"🏙 Қала ішінде", "🛣 Қалааралық (Межгород)"}))
 async def process_delivery_type(message: types.Message, state: FSMContext):
     dtype = "city" if message.text == "🏙 Қала ішінде" else "intercity"
     await state.update_data(delivery_type=dtype)
+    await state.set_state(OrderDelivery.item_info)
+    await message.answer("📦 <b>Не жеткізу керек?</b> (Мысалы: Документ, сәлемдеме, қорап т.б.):", reply_markup=cancel_menu(), parse_mode="HTML")
+
+# Шаг 2: Ввод информации о посылке
+@dp.message(OrderDelivery.item_info)
+async def process_delivery_item(message: types.Message, state: FSMContext):
+    await state.update_data(item_info=message.text)
     await state.set_state(OrderDelivery.from_loc)
     await message.answer("📍 <b>Затты қай жерден алып кету керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
 
+# Шаг 3: Ввод адреса отправления
 @dp.message(OrderDelivery.from_loc)
 async def process_delivery_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderDelivery.to_loc)
     await message.answer("🏁 <b>Қай жерге жеткізіп беру керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
 
+# Шаг 4: Ввод адреса назначения
 @dp.message(OrderDelivery.to_loc)
 async def process_delivery_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
-    await state.set_state(OrderDelivery.item_info)
-    await message.answer("📦 <b>Не жеткізу керек?</b> (Мысалы: Документ, сәлемдеме, қорап т.б.):", reply_markup=cancel_menu(), parse_mode="HTML")
-
-@dp.message(OrderDelivery.item_info)
-async def process_delivery_item(message: types.Message, state: FSMContext):
-    await state.update_data(item_info=message.text)
     await state.set_state(OrderDelivery.price)
     await message.answer("💰 <b>Жеткізу ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
+# Шаг 5: Ввод цены и отправка заказа
 @dp.message(OrderDelivery.price)
 async def process_delivery_price(message: types.Message, state: FSMContext):
     price = message.text
@@ -451,6 +456,7 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     client = cursor.fetchone()
     phone = client[0] if client else "Көрсетілмеген"
 
+    # Поле seats используется для хранения наименования посылки (item_info)
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, seats, price, phone, status) VALUES (?, 'delivery', ?, ?, ?, ?, ?, 'new')",
                    (message.from_user.id, data['from_loc'], data['to_loc'], data['item_info'], price, phone))
     order_id = cursor.lastrowid
@@ -464,10 +470,10 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     target_group_id = CITY_GROUP_ID if dtype == "city" else INTERCITY_GROUP_ID
 
     card_text = (
-        f"🚨 <b>ЖОЛДАС ТАКСИ: ЖЕТКІЗУ ({type_title}) №{order_id}</b>\n\n"
+        f"📦 <b>ЖЕТКІЗУ (ДОСТАВКА - {type_title}) №{order_id}</b>\n\n"
+        f"📦 <b>Не жеткізу керек:</b> {data['item_info']}\n"
         f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
         f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
-        f"📦 <b>Зат:</b> {data['item_info']}\n"
         f"💰 <b>Жеткізу ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
@@ -513,11 +519,12 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. ОБНОВЛЯЕМ СООБЩЕНИЕ В ГРУППЕ (без телефона, без кнопок)
+    # 1. ОБНОВЛЯЕМ СООБЩЕНИЕ В ГРУППЕ
+    order_label = "📦 ЖЕТКІЗУ (ДОСТАВКА)" if order_type == 'delivery' else "🚖 ТАПСЫРЫС"
     group_card_text = (
-        f"✅ <b>ТАПСЫРЫС №{order_id} АЛЫНДЫ!</b>\n\n"
+        f"✅ <b>{order_label} №{order_id} АЛЫНДЫ!</b>\n\n"
         f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
-        f"💰 <b>Жол ақысы:</b> {price}\n"
+        f"💰 <b>Ақысы:</b> {price}\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}"
     )
     try:
@@ -528,21 +535,30 @@ async def accept_order(callback_query: types.CallbackQuery):
     await callback_query.answer("Тапсырысты алдыңыз!")
 
     # 2. ОТПРАВЛЯЕМ КАРТОЧКУ ТАКСИСТУ В ЛС (с контактами)
-    driver_pm_text = (
-        f"🚨 <b>СІЗ ҚАБЫЛДАҒАН ТАПСЫРЫС №{order_id}</b>\n\n"
-        f"👤 <b>Клиент:</b> {client_name}\n"
-        f"📍 <b>Қайдан:</b> {from_loc}\n"
-        f"🏁 <b>Қайда:</b> {to_loc}\n"
-    )
-    if order_type == 'intercity':
-        driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
-    elif order_type == 'delivery':
-        driver_pm_text += f"📦 <b>Зат:</b> {seats}\n"
-    
-    driver_pm_text += (
-        f"💰 <b>Жол ақысы:</b> {price}\n"
-        f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
-    )
+    if order_type == 'delivery':
+        driver_pm_text = (
+            f"📦 <b>СІЗ ҚАБЫЛДАҒАН ЖЕТКІЗУ (ДОСТАВКА) №{order_id}</b>\n\n"
+            f"👤 <b>Клиент:</b> {client_name}\n"
+            f"📦 <b>Не жеткізу керек:</b> {seats}\n"
+            f"📍 <b>Қайдан:</b> {from_loc}\n"
+            f"🏁 <b>Қайда:</b> {to_loc}\n"
+            f"💰 <b>Жеткізу ақысы:</b> {price}\n"
+            f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
+        )
+    else:
+        driver_pm_text = (
+            f"🚨 <b>СІЗ ҚАБЫЛДАҒАН ТАПСЫРЫС №{order_id}</b>\n\n"
+            f"👤 <b>Клиент:</b> {client_name}\n"
+            f"📍 <b>Қайдан:</b> {from_loc}\n"
+            f"🏁 <b>Қайда:</b> {to_loc}\n"
+        )
+        if order_type == 'intercity':
+            driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
+        
+        driver_pm_text += (
+            f"💰 <b>Жол ақысы:</b> {price}\n"
+            f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
+        )
 
     wa_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_client_phone}")]
@@ -554,8 +570,9 @@ async def accept_order(callback_query: types.CallbackQuery):
         logging.error(f"Ошибка отправки водителю в ЛС: {e}")
 
     # 3. ОТПРАВЛЯЕМ КАРТОЧКУ КЛИЕНТУ В ЛС
+    delivery_note = "жеткізу (доставка) " if order_type == 'delivery' else ""
     client_msg = (
-        f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
+        f"🚖 <b>№{order_id} {delivery_note}тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
         f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_driver_phone}\">+{clean_driver_phone}</a>\n"
         f"🚘 <b>Көлігі:</b> {driver_car}\n\n"
