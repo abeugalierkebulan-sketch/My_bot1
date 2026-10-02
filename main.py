@@ -144,23 +144,23 @@ async def cmd_start(message: types.Message, state: FSMContext):
             f"🚖 <b>«Жолдас такси»</b> қызметін пайдалану үшін алдымен тіркелу қажет.\n\n"
             f"👤 <b>Аты-жөніңізді жазыңыз (ФИО):</b>"
         )
-        await message.answer(text, reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
+        await message.answer(text, reply_markup=cancel_menu(), parse_mode="HTML")
 
-# --- ОТМЕНА ---
-@dp.message(F.text == "❌ Бас тарту")
+# --- ОТМЕНА (НА ЛЮБОМ ЭТАПЕ) ---
+@dp.message(F.text.in_({"❌ Бас тарту", "⬅️ Қайту (артқа)"}))
 async def cancel_order(message: types.Message, state: FSMContext):
     await state.clear()
     if await is_client_registered(message.from_user.id):
-        await message.answer("Тоқтатылды.", reply_markup=main_menu())
+        await message.answer("❌ Тапсырыс тоқтатылды.", reply_markup=main_menu())
     else:
-        await message.answer("Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
+        await message.answer("❌ Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
 
 # --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(ClientRegister.full_name)
 async def process_client_name(message: types.Message, state: FSMContext):
     await state.update_data(client_full_name=message.text)
     await state.set_state(ClientRegister.phone)
-    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=cancel_menu())
 
 @dp.message(ClientRegister.phone)
 async def process_client_phone(message: types.Message, state: FSMContext):
@@ -274,7 +274,7 @@ async def auto_approve_driver(chat_join_request: ChatJoinRequest):
 async def start_city_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
         await state.set_state(ClientRegister.full_name)
-        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
         return
 
     await state.set_state(OrderCity.from_loc)
@@ -284,13 +284,13 @@ async def start_city_order(message: types.Message, state: FSMContext):
 async def process_city_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderCity.to_loc)
-    await message.answer("🏁 <b>Қайда барамыз?</b>", parse_mode="HTML")
+    await message.answer("🏁 <b>Қайда барамыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderCity.to_loc)
 async def process_city_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
     await state.set_state(OrderCity.price)
-    await message.answer("💰 <b>Жолқыны қанша ұсынасыз?</b>", parse_mode="HTML")
+    await message.answer("💰 <b>Жол ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderCity.price)
 async def process_city_price(message: types.Message, state: FSMContext):
@@ -316,7 +316,7 @@ async def process_city_price(message: types.Message, state: FSMContext):
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n"
         f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
         f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
-        f"💰 <b>Бағасы:</b> {price}\n"
+        f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
@@ -326,7 +326,7 @@ async def process_city_price(message: types.Message, state: FSMContext):
 async def start_intercity_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
         await state.set_state(ClientRegister.full_name)
-        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
         return
 
     await state.set_state(OrderIntercity.from_loc)
@@ -336,25 +336,25 @@ async def start_intercity_order(message: types.Message, state: FSMContext):
 async def process_inter_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderIntercity.to_loc)
-    await message.answer("🏁 <b>Қай қалаға / ауылға барасыз?</b>", parse_mode="HTML")
+    await message.answer("🏁 <b>Қай қалаға / ауылға барасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderIntercity.to_loc)
 async def process_inter_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
     await state.set_state(OrderIntercity.date_time)
-    await message.answer("📅 <b>Қай күні және сағат қаншада?</b>", parse_mode="HTML")
+    await message.answer("📅 <b>Қай күні және сағат қаншада?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderIntercity.date_time)
 async def process_inter_time(message: types.Message, state: FSMContext):
     await state.update_data(date_time=message.text)
     await state.set_state(OrderIntercity.seats)
-    await message.answer("👥 <b>Қанша орын керек?</b>", parse_mode="HTML")
+    await message.answer("👥 <b>Қанша орын керек?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderIntercity.seats)
 async def process_inter_seats(message: types.Message, state: FSMContext):
     await state.update_data(seats=message.text)
     await state.set_state(OrderIntercity.price)
-    await message.answer("💰 <b>Ұсынатын бағаңыз:</b>", parse_mode="HTML")
+    await message.answer("💰 <b>Жол ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
 @dp.message(OrderIntercity.price)
 async def process_inter_price(message: types.Message, state: FSMContext):
@@ -382,7 +382,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
         f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
         f"📅 <b>Уақыты:</b> {data['date_time']}\n"
         f"👥 <b>Орын:</b> {data['seats']}\n"
-        f"💰 <b>Бағасы:</b> {price}\n"
+        f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
@@ -431,7 +431,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     group_card_text = (
         f"✅ <b>ТАПСЫРЫС №{order_id} АЛЫНДЫ!</b>\n\n"
         f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
-        f"💰 <b>Бағасы:</b> {price}\n"
+        f"💰 <b>Жол ақысы:</b> {price}\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}"
     )
     try:
@@ -452,7 +452,7 @@ async def accept_order(callback_query: types.CallbackQuery):
         driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
     
     driver_pm_text += (
-        f"💰 <b>Бағасы:</b> {price}\n"
+        f"💰 <b>Жол ақысы:</b> {price}\n"
         f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
     )
 
