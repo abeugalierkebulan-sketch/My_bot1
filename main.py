@@ -65,7 +65,7 @@ def init_db():
 
 init_db()
 
-# --- FSM ---
+# --- FSM (СОСТОЯНИЯ) ---
 class ClientRegister(StatesGroup):
     full_name = State()
     phone = State()
@@ -155,7 +155,7 @@ async def cancel_order(message: types.Message, state: FSMContext):
     else:
         await message.answer("Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
 
-# --- РЕГИСТРАЦИЯ КЛИЕНТА (ТОЛЬКО РУЧНОЙ ВВОД ТЕЛЕФОНА) ---
+# --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(ClientRegister.full_name)
 async def process_client_name(message: types.Message, state: FSMContext):
     await state.update_data(client_full_name=message.text)
@@ -178,6 +178,8 @@ async def process_client_phone(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка сохранения клиента: {e}")
 
     await state.clear()
+
+    # СРАЗУ ПОСЛЕ ВВОДА НОМЕРА ВЫДАЕМ ГЛАВНОЕ МЕНЮ
     await message.answer(
         "✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇",
         reply_markup=main_menu(),
@@ -425,7 +427,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Обновляем сообщение В ГРУППЕ (БЕЗ номера телефона, БЕЗ кнопок)
+    # 1. ОБНОВЛЯЕМ СООБЩЕНИЕ В ГРУППЕ (без телефона, без кнопок)
     group_card_text = (
         f"✅ <b>ТАПСЫРЫС №{order_id} АЛЫНДЫ!</b>\n\n"
         f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
@@ -439,7 +441,7 @@ async def accept_order(callback_query: types.CallbackQuery):
 
     await callback_query.answer("Тапсырысты алдыңыз!")
 
-    # 2. Отправляем КАРТОЧКУ ТАКСИСТУ В ЛИЧКУ (со всеми данными клиента)
+    # 2. ОТПРАВЛЯЕМ КАРТОЧКУ ТАКСИСТУ В ЛС (с контактами)
     driver_pm_text = (
         f"🚨 <b>СІЗ ҚАБЫЛДАҒАН ТАПСЫРЫС №{order_id}</b>\n\n"
         f"👤 <b>Клиент:</b> {client_name}\n"
@@ -463,7 +465,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки водителю в ЛС: {e}")
 
-    # 3. Отправляем карточку КЛИЕНТУ В ЛИЧКУ
+    # 3. ОТПРАВЛЯЕМ КАРТОЧКУ КЛИЕНТУ В ЛС
     client_msg = (
         f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
