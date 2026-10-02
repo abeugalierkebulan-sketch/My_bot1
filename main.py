@@ -25,7 +25,7 @@ def init_db():
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     
-    # Заказы
+    # Таблица заказов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,7 +41,7 @@ def init_db():
         )
     ''')
     
-    # Водители
+    # Таблица водителей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS drivers (
             user_id INTEGER PRIMARY KEY,
@@ -51,7 +51,7 @@ def init_db():
         )
     ''')
 
-    # Клиенты
+    # Таблица клиентов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clients (
             user_id INTEGER PRIMARY KEY,
@@ -83,18 +83,18 @@ class OrderIntercity(StatesGroup):
     price = State()
 
 class OrderDelivery(StatesGroup):
-    delivery_type = State() # город или межгород
-    item_info = State()     # что именно доставить
-    from_loc = State()      # откуда забрать
-    to_loc = State()        # куда доставить
-    price = State()         # цена
+    delivery_type = State() # 'city' или 'intercity'
+    item_info = State()     # Что нужно доставить
+    from_loc = State()      # Откуда забрать
+    to_loc = State()        # Куда доставить
+    price = State()         # Предлагаемая цена
 
 class DriverRegister(StatesGroup):
     full_name = State()
     phone = State()
     car_info = State()
 
-# --- МЕНЮ ---
+# --- МЕНЮ КНОПОК ---
 def main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -120,7 +120,7 @@ def cancel_menu():
         resize_keyboard=True
     )
 
-# --- ПРОВЕРКА РЕГИСТРАЦИИ КЛИЕНТА ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 async def is_client_registered(user_id: int) -> bool:
     try:
         conn = sqlite3.connect("joldas_taxi.db")
@@ -133,7 +133,6 @@ async def is_client_registered(user_id: int) -> bool:
         logging.error(f"Ошибка проверки клиента: {e}")
         return False
 
-# Вспомогательная функция для форматирования телефона
 def clean_phone_number(raw_phone: str) -> str:
     digits = ''.join(filter(str.isdigit, str(raw_phone)))
     if len(digits) == 10:
@@ -163,7 +162,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         await message.answer(text, reply_markup=cancel_menu(), parse_mode="HTML")
 
-# --- ОТМЕНА (НА ЛЮБОМ ЭТАПЕ) ---
+# --- ОТМЕНА ---
 @dp.message(F.text.in_({"❌ Бас тарту", "⬅️ Қайту (артқа)"}))
 async def cancel_order(message: types.Message, state: FSMContext):
     await state.clear()
@@ -181,8 +180,8 @@ async def process_client_name(message: types.Message, state: FSMContext):
 
 @dp.message(ClientRegister.phone)
 async def process_client_phone(message: types.Message, state: FSMContext):
-    phone = message.text
     data = await state.get_data()
+    phone = message.text
     
     try:
         conn = sqlite3.connect("joldas_taxi.db")
@@ -195,12 +194,7 @@ async def process_client_phone(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка сохранения клиента: {e}")
 
     await state.clear()
-
-    await message.answer(
-        "✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇",
-        reply_markup=main_menu(),
-        parse_mode="HTML"
-    )
+    await message.answer("✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇", reply_markup=main_menu(), parse_mode="HTML")
 
 # --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болу")
@@ -260,17 +254,12 @@ async def process_driver_car(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
         ])
         
-        await message.answer(
-            "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\n"
-            "Енді тапсырыстарды көру үшін төмендегі батырмалар арқылы жұмыс топтарына қосылыңыз 👇",
-            reply_markup=group_kb,
-            parse_mode="HTML"
-        )
+        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\nЕнді тапсырыстарды көру үшін төмендегі батырмалар арқылы жұмыс топтарына қосылыңыз 👇", reply_markup=group_kb, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Не удалось сгенерировать ссылки: {e}")
         await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b> Енді жұмыс топтарына қосылу өтінішін жіберіңіз!", reply_markup=main_menu(), parse_mode="HTML")
 
-# --- АВТО-ОДОБРЕНИЕ ЗАЯВОК ---
+# --- АВТО-ОДОБРЕНИЕ ВОДИТЕЛЕЙ ---
 @dp.chat_join_request()
 async def auto_approve_driver(chat_join_request: ChatJoinRequest):
     user_id = chat_join_request.from_user.id
@@ -403,7 +392,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
 
-# --- 3. ЗАКАЗ ДОСТАВКИ (С ВЫБОРОМ ГОРОД / МЕЖГОРОД) ---
+# --- 3. ЗАКАЗ ДОСТАВКИ (ГОРОД И МЕЖГОРОД) ---
 @dp.message(F.text == "📦 Жеткізу (Доставка)")
 async def start_delivery_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
@@ -414,41 +403,42 @@ async def start_delivery_order(message: types.Message, state: FSMContext):
     await state.set_state(OrderDelivery.delivery_type)
     await message.answer("📦 <b>Жеткізу түрін таңдаңыз:</b>", reply_markup=delivery_menu(), parse_mode="HTML")
 
-# Шаг 1: Выбор типа доставки (город / межгород)
+# Шаг 1: Выбор «Қала ішінде» или «Қалааралық»
 @dp.message(OrderDelivery.delivery_type, F.text.in_({"🏙 Қала ішінде", "🛣 Қалааралық (Межгород)"}))
 async def process_delivery_type(message: types.Message, state: FSMContext):
     dtype = "city" if message.text == "🏙 Қала ішінде" else "intercity"
     await state.update_data(delivery_type=dtype)
     await state.set_state(OrderDelivery.item_info)
-    await message.answer("📦 <b>Не жеткізу керек?</b> (Мысалы: Документ, сәлемдеме, қорап т.б.):", reply_markup=cancel_menu(), parse_mode="HTML")
+    await message.answer("📦 <b>Не жеткізу керек?</b>\n(Мысалы: Документ, қорап 5кг, кілт, т.б. қолдан жазыңыз):", reply_markup=cancel_menu(), parse_mode="HTML")
 
-# Шаг 2: Ввод информации о посылке
+# Шаг 2: Ввод «Что именно доставить»
 @dp.message(OrderDelivery.item_info)
 async def process_delivery_item(message: types.Message, state: FSMContext):
     await state.update_data(item_info=message.text)
     await state.set_state(OrderDelivery.from_loc)
-    await message.answer("📍 <b>Затты қай жерден алып кету керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
+    await message.answer("📍 <b>Затты қай жерден алып кету керек?</b> (Адрес / Объект):", reply_markup=cancel_menu(), parse_mode="HTML")
 
-# Шаг 3: Ввод адреса отправления
+# Шаг 3: Ввод «Откуда забрать»
 @dp.message(OrderDelivery.from_loc)
 async def process_delivery_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderDelivery.to_loc)
-    await message.answer("🏁 <b>Қай жерге жеткізіп беру керек?</b> (Адрес / объект):", reply_markup=cancel_menu(), parse_mode="HTML")
+    await message.answer("🏁 <b>Қай жерге жеткізіп беру керек?</b> (Адрес / Объект):", reply_markup=cancel_menu(), parse_mode="HTML")
 
-# Шаг 4: Ввод адреса назначения
+# Шаг 4: Ввод «Куда доставить»
 @dp.message(OrderDelivery.to_loc)
 async def process_delivery_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
     await state.set_state(OrderDelivery.price)
     await message.answer("💰 <b>Жеткізу ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
-# Шаг 5: Ввод цены и отправка заказа
+# Шаг 5: Ввод цены и публикация карточки
 @dp.message(OrderDelivery.price)
 async def process_delivery_price(message: types.Message, state: FSMContext):
     price = message.text
     data = await state.get_data()
     dtype = data.get('delivery_type', 'city')
+    item_info = data.get('item_info', 'Сәлемдеме')
     
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
@@ -456,9 +446,9 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     client = cursor.fetchone()
     phone = client[0] if client else "Көрсетілмеген"
 
-    # Поле seats используется для хранения наименования посылки (item_info)
+    # Записываем item_info в поле seats
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, seats, price, phone, status) VALUES (?, 'delivery', ?, ?, ?, ?, ?, 'new')",
-                   (message.from_user.id, data['from_loc'], data['to_loc'], data['item_info'], price, phone))
+                   (message.from_user.id, data['from_loc'], data['to_loc'], item_info, price, phone))
     order_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -466,12 +456,17 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(), parse_mode="HTML")
 
-    type_title = "ҚАЛА ІШІНДЕ" if dtype == "city" else "ҚАЛААРАЛЫҚ"
-    target_group_id = CITY_GROUP_ID if dtype == "city" else INTERCITY_GROUP_ID
+    # В зависимости от выбора отправляем либо в городскую группу, либо в межгород
+    if dtype == "city":
+        type_title = "ҚАЛА ІШІНДЕ"
+        target_group_id = CITY_GROUP_ID
+    else:
+        type_title = "ҚАЛААРАЛЫҚ (МЕЖГОРОД)"
+        target_group_id = INTERCITY_GROUP_ID
 
     card_text = (
         f"📦 <b>ЖЕТКІЗУ (ДОСТАВКА - {type_title}) №{order_id}</b>\n\n"
-        f"📦 <b>Не жеткізу керек:</b> {data['item_info']}\n"
+        f"📦 <b>Зат / Посылка:</b> {item_info}\n"
         f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
         f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
         f"💰 <b>Жеткізу ақысы:</b> {price}\n"
@@ -495,21 +490,21 @@ async def accept_order(callback_query: types.CallbackQuery):
         conn.close()
         return
 
-    # Данные водителя из базы
+    # Водитель
     cursor.execute("SELECT full_name, phone, car_info FROM drivers WHERE user_id = ?", (driver.id,))
     driver_db = cursor.fetchone()
 
-    # Данные клиента из базы
+    # Клиент
     client_id = order[0]
     cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (client_id,))
     client_db = cursor.fetchone()
 
-    # Фиксируем принятие
+    # Фиксация принятия
     cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()
 
-    order_type, from_loc, to_loc, date_time, seats, price, raw_client_phone = order[1], order[2], order[3], order[4], order[5], order[6], order[7]
+    order_type, from_loc, to_loc, date_time, item_or_seats, price, raw_client_phone = order[1], order[2], order[3], order[4], order[5], order[6], order[7]
 
     clean_client_phone = clean_phone_number(raw_client_phone)
     client_name = client_db[0] if client_db else "Клиент"
@@ -519,7 +514,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. ОБНОВЛЯЕМ СООБЩЕНИЕ В ГРУППЕ
+    # 1. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ
     order_label = "📦 ЖЕТКІЗУ (ДОСТАВКА)" if order_type == 'delivery' else "🚖 ТАПСЫРЫС"
     group_card_text = (
         f"✅ <b>{order_label} №{order_id} АЛЫНДЫ!</b>\n\n"
@@ -534,14 +529,14 @@ async def accept_order(callback_query: types.CallbackQuery):
 
     await callback_query.answer("Тапсырысты алдыңыз!")
 
-    # 2. ОТПРАВЛЯЕМ КАРТОЧКУ ТАКСИСТУ В ЛС (с контактами)
+    # 2. ОТПРАВКА ДАННЫХ ВОДИТЕЛЮ В ЛС
     if order_type == 'delivery':
         driver_pm_text = (
-            f"📦 <b>СІЗ ҚАБЫЛДАҒАН ЖЕТКІЗУ (ДОСТАВКА) №{order_id}</b>\n\n"
+            f"📦 <b>СІЗ ҚАБЫЛДАҒАН ЖЕТКІЗУ №{order_id}</b>\n\n"
             f"👤 <b>Клиент:</b> {client_name}\n"
-            f"📦 <b>Не жеткізу керек:</b> {seats}\n"
-            f"📍 <b>Қайдан:</b> {from_loc}\n"
-            f"🏁 <b>Қайда:</b> {to_loc}\n"
+            f"📦 <b>Зат / Посылка:</b> {item_or_seats}\n"
+            f"📍 <b>Қайдан алып кету:</b> {from_loc}\n"
+            f"🏁 <b>Қайда жеткізу:</b> {to_loc}\n"
             f"💰 <b>Жеткізу ақысы:</b> {price}\n"
             f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
         )
@@ -553,7 +548,7 @@ async def accept_order(callback_query: types.CallbackQuery):
             f"🏁 <b>Қайда:</b> {to_loc}\n"
         )
         if order_type == 'intercity':
-            driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
+            driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {item_or_seats}\n"
         
         driver_pm_text += (
             f"💰 <b>Жол ақысы:</b> {price}\n"
@@ -569,7 +564,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки водителю в ЛС: {e}")
 
-    # 3. ОТПРАВЛЯЕМ КАРТОЧКУ КЛИЕНТУ В ЛС
+    # 3. ОТПРАВКА УВЕДОМЛЕНИЯ КЛИЕНТУ
     delivery_note = "жеткізу (доставка) " if order_type == 'delivery' else ""
     client_msg = (
         f"🚖 <b>№{order_id} {delivery_note}тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
@@ -583,7 +578,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки клиенту: {e}")
 
-# --- ВЕБ-СЕРВЕР И ЗАПУСК ---
+# --- ВЕБ-СЕРВЕР ---
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
 
