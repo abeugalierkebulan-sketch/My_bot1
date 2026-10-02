@@ -103,24 +103,8 @@ def cancel_menu():
         resize_keyboard=True
     )
 
-# --- СТАРТ И ОТМЕНА ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    text = (
-        f"Ассалаумағалейкум, <b>{message.from_user.first_name}</b>!\n\n"
-        f"🚖 <b>«Жолдас такси»</b> ботына қош келдіңіз!\n\n"
-        f"Керекті бөлімді таңдаңыз 👇"
-    )
-    await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
-
-@dp.message(F.text == "❌ Бас тарту")
-async def cancel_order(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Тоқтатылды.", reply_markup=main_menu())
-
-# --- ВСПУТАТЬ РЕГИСТРАЦИЮ КЛИЕНТА ПЕРЕД ЗАКАЗОМ ---
-async def check_client_registered(user_id: int) -> bool:
+# --- ПРОВЕРКА РЕГИСТРАЦИИ КЛИЕНТА ---
+async def is_client_registered(user_id: int) -> bool:
     try:
         conn = sqlite3.connect("joldas_taxi.db")
         cursor = conn.cursor()
@@ -132,16 +116,48 @@ async def check_client_registered(user_id: int) -> bool:
         logging.error(f"Ошибка проверки клиента: {e}")
         return False
 
-# --- РЕГИСТРАЦИЯ КЛИЕНТА (ШАГИ) ---
+# --- СТАРТ ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    
+    # Проверяем зарегистрирован ли клиент
+    if await is_client_registered(message.from_user.id):
+        text = (
+            f"Ассалаумағалейкум, <b>{message.from_user.first_name}</b>!\n\n"
+            f"🚖 <b>«Жолдас такси»</b> ботына қош келдіңіз!\n\n"
+            f"Керекті бөлімді таңдаңыз 👇"
+        )
+        await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+    else:
+        # Если НЕ зарегистрирован, запускаем регистрацию и НЕ даем главное меню
+        await state.set_state(ClientRegister.full_name)
+        text = (
+            f"Ассалаумағалейкум, <b>{message.from_user.first_name}</b>!\n\n"
+            f"🚖 <b>«Жолдас такси»</b> қызметін пайдалану үшін алдымен тіркелу қажет.\n\n"
+            f"👤 <b>Аты-жөніңізді жазыңыз (ФИО):</b>"
+        )
+        await message.answer(text, reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
+
+# --- ОТМЕНА ---
+@dp.message(F.text == "❌ Бас тарту")
+async def cancel_order(message: types.Message, state: FSMContext):
+    await state.clear()
+    if await is_client_registered(message.from_user.id):
+        await message.answer("Тоқтатылды.", reply_markup=main_menu())
+    else:
+        await message.answer("Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
+
+# --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(ClientRegister.full_name)
 async def process_client_name(message: types.Message, state: FSMContext):
     await state.update_data(client_full_name=message.text)
     await state.set_state(ClientRegister.phone)
     phone_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Нөмірді жіберу", request_contact=True)], [KeyboardButton(text="❌ Бас тарту")]],
+        keyboard=[[KeyboardButton(text="📱 Нөмірді жіберу", request_contact=True)]],
         resize_keyboard=True, one_time_keyboard=True
     )
-    await message.answer("📱 Байланыс телефоныңызды жіберіңіз:", reply_markup=phone_kb)
+    await message.answer("📱 Байланыс телефоныңызды жіберіңіз немесе жазыңыз:", reply_markup=phone_kb)
 
 @dp.message(ClientRegister.phone)
 async def process_client_phone(message: types.Message, state: FSMContext):
@@ -159,7 +175,13 @@ async def process_client_phone(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка сохранения клиента: {e}")
 
     await state.clear()
-    await message.answer("✅ <b>Сіз тіркелдіңіз!</b> Енді қайтадан керекті батырманы таңдаңыз 👇", reply_markup=main_menu(), parse_mode="HTML")
+    
+    # ТОЛЬКО ПОСЛЕ РЕГИСТРАЦИИ ПОКАЗЫВАЕМ МЕНЮ
+    await message.answer(
+        "✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇",
+        reply_markup=main_menu(),
+        parse_mode="HTML"
+    )
 
 # --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болу")
@@ -252,9 +274,9 @@ async def auto_approve_driver(chat_join_request: ChatJoinRequest):
 # --- 1. ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
 async def start_city_order(message: types.Message, state: FSMContext):
-    if not await check_client_registered(message.from_user.id):
+    if not await is_client_registered(message.from_user.id):
         await state.set_state(ClientRegister.full_name)
-        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
         return
 
     await state.set_state(OrderCity.from_loc)
@@ -304,9 +326,9 @@ async def process_city_price(message: types.Message, state: FSMContext):
 # --- 2. ЗАКАЗ МЕЖГОРОД ---
 @dp.message(F.text == "🛣 Қалааралық (Межгород)")
 async def start_intercity_order(message: types.Message, state: FSMContext):
-    if not await check_client_registered(message.from_user.id):
+    if not await is_client_registered(message.from_user.id):
         await state.set_state(ClientRegister.full_name)
-        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=types.ReplyKeyboardRemove(), parse_mode="HTML")
         return
 
     await state.set_state(OrderIntercity.from_loc)
@@ -408,7 +430,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     driver_phone = driver_db[1] if driver_db else "Көрсетілмеген"
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Обновляем карточку прямо в группе для водителя
+    # 1. Карточка в группу
     group_card_text = (
         f"✅ <b>ТАПСЫРЫС №{order_id} АЛЫНДЫ!</b>\n\n"
         f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
@@ -428,7 +450,7 @@ async def accept_order(callback_query: types.CallbackQuery):
 
     await callback_query.answer("Тапсырысты алдыңыз!")
 
-    # 2. Отправляем полноценную карточку водителя клиенту в ЛС
+    # 2. Карточка клиенту
     client_msg = (
         f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
@@ -441,7 +463,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки клиенту: {e}")
 
-# --- ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА И ЗАПУСК ---
+# --- ВЕБ-СЕРВЕР И ЗАПУСК ---
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
 
