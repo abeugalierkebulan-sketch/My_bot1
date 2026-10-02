@@ -114,7 +114,6 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
     conn.close()
 
     if driver:
-        # Если водитель уже зарегистрирован, сразу выдаём ссылки
         try:
             city_link = await bot.export_chat_invite_link(CITY_GROUP_ID)
             intercity_link = await bot.export_chat_invite_link(INTERCITY_GROUP_ID)
@@ -159,7 +158,6 @@ async def process_driver_car(message: types.Message, state: FSMContext):
     conn.close()
     await state.clear()
 
-    # Генерация пригласительных ссылок
     try:
         city_link = await bot.export_chat_invite_link(CITY_GROUP_ID)
         intercity_link = await bot.export_chat_invite_link(INTERCITY_GROUP_ID)
@@ -212,13 +210,13 @@ async def start_city_order(message: types.Message, state: FSMContext):
 async def process_city_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderCity.to_loc)
-    await message.answer("🏁 <b>Қайда барамыз?</b>:", parse_mode="HTML")
+    await message.answer("🏁 <b>Қайда барамыз?</b>", parse_mode="HTML")
 
 @dp.message(OrderCity.to_loc)
 async def process_city_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
     await state.set_state(OrderCity.price)
-    await message.answer("💰 <b>Жолқыны канша ұсынасыз?</b>", parse_mode="HTML")
+    await message.answer("💰 <b>Жолқыны қанша ұсынасыз?</b>", parse_mode="HTML")
 
 @dp.message(OrderCity.price)
 async def process_city_price(message: types.Message, state: FSMContext):
@@ -234,6 +232,7 @@ async def process_city_price(message: types.Message, state: FSMContext):
 async def process_city_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
     data = await state.get_data()
+    
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, price, phone, status) VALUES (?, 'city', ?, ?, ?, ?, 'new')",
@@ -245,7 +244,12 @@ async def process_city_phone(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(), parse_mode="HTML")
 
-    card_text = f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n📍 <b>Қайдан:</b> {data['from_loc']}\n🏁 <b>Қайда:</b> {data['to_loc']}\n💰 <b>Бағасы:</b> {data['price']}\n"
+    card_text = (
+        f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n"
+        f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
+        f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
+        f"💰 <b>Бағасы:</b> {data['price']}\n"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
 
@@ -265,7 +269,7 @@ async def process_inter_from(message: types.Message, state: FSMContext):
 async def process_inter_to(message: types.Message, state: FSMContext):
     await state.update_data(to_loc=message.text)
     await state.set_state(OrderIntercity.date_time)
-    await message.answer("📅 <b>Қай күні және сағат каншада?</b>", parse_mode="HTML")
+    await message.answer("📅 <b>Қай күні және сағат қаншада?</b>", parse_mode="HTML")
 
 @dp.message(OrderIntercity.date_time)
 async def process_inter_time(message: types.Message, state: FSMContext):
@@ -293,6 +297,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
 async def process_inter_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
     data = await state.get_data()
+    
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, date_time, seats, price, phone, status) VALUES (?, 'intercity', ?, ?, ?, ?, ?, ?, 'new')",
@@ -304,11 +309,18 @@ async def process_inter_phone(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(), parse_mode="HTML")
 
-    card_text = f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛААРАЛЫҚ №{order_id}</b>\n\n📍 <b>Қайдан:</b> {data['from_loc']}\n🏁 <b>Қайда:</b> {data['to_loc']}\n📅 <b>Уақыты:</b> {data['date_time']}\n👥 <b>Орын:</b> {data['seats']}\n💰 <b>Бағасы:</b> {data['price']}\n"
+    card_text = (
+        f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛААРАЛЫҚ №{order_id}</b>\n\n"
+        f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
+        f"🏁 <b>Қайда:</b> {data['to_loc']}\n"
+        f"📅 <b>Уақыты:</b> {data['date_time']}\n"
+        f"👥 <b>Орын:</b> {data['seats']}\n"
+        f"💰 <b>Бағасы:</b> {data['price']}\n"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
 
-# --- ПРИНЯТИЕ ЗАКАЗА ---
+# --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_order(callback_query: types.CallbackQuery):
     order_id = callback_query.data.split('_')[1]
@@ -324,46 +336,56 @@ async def accept_order(callback_query: types.CallbackQuery):
         conn.close()
         return
 
+    # Проверяем, может ли бот отправить личное сообщение водителю
+    clean_phone = ''.join(filter(str.isdigit, str(order[5])))
+    if not clean_phone.startswith("7") and not clean_phone.startswith("8") and len(clean_phone) == 10:
+        clean_phone = "7" + clean_phone
+
+    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_phone}"), 
+         InlineKeyboardButton(text="📞 Қоңырау шалу", url=f"tel:+{clean_phone}")]
+    ])
+
+    order_details_for_driver = (
+        f"✅ <b>Тапсырыс №{order_id} сізге берілді!</b>\n\n"
+        f"📍 <b>Маршрут:</b> {order[2]} ➔ {order[3]}\n"
+        f"💰 <b>Бағасы:</b> {order[4]}\n"
+        f"📞 <b>Клиент нөмірі:</b> <code>+{clean_phone}</code>"
+    )
+
+    try:
+        # Отправляем контакт клиенту водителю в ЛС
+        await bot.send_message(chat_id=driver.id, text=order_details_for_driver, reply_markup=driver_kb, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Не удалось отправить ЛС водителю: {e}")
+        await callback_query.answer("❌ Қате! Алдымен ботқа жекеге өтіп (ЛС) /start басыңыз!", show_alert=True)
+        conn.close()
+        return
+
+    # Обновляем статус заказа в БД
     cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()
 
-    client_id, _, from_loc, to_loc, price, client_phone = order[0], order[1], order[2], order[3], order[4], order[5]
-    
-    # 1. Обновляем карточку в супергруппе
+    client_id = order[0]
+
+    # Обновляем карточку заказа в супергруппе
     await callback_query.message.edit_text(
         f"{callback_query.message.text}\n\n✅ <b>ТАПСЫРЫС АЛЫНДЫ!</b>\nЖүргізуші: {driver.full_name}", 
         parse_mode="HTML"
     )
 
-    # 2. Уведомляем клиента в ЛС
+    # Уведомляем клиента
     try:
         await bot.send_message(
             chat_id=client_id, 
-            text=f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\nЖүргізуші: <b>{driver.full_name}</b>\nКүте турыңыз, сізбен байланысады.", 
+            text=f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\nЖүргізуші: <b>{driver.full_name}</b>\nКүте тұрыңыз, сізбен байланысады.", 
             parse_mode="HTML"
         )
     except Exception as e:
-        logging.error(f"Не удалось отправить сообщение клиенту: {e}")
+        logging.error(f"Не удалось отправить ЛС клиенту: {e}")
 
-    # 3. Отправляем детали заказа водителю в ЛС
-    clean_phone = ''.join(filter(str.isdigit, client_phone))
-    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{clean_phone}"), 
-         InlineKeyboardButton(text="📞 Қоңырау", url=f"tel:+{clean_phone}")]
-    ])
-    
-    try:
-        await bot.send_message(
-            chat_id=driver.id, 
-            text=f"✅ <b>Заказ №{order_id} қабылданды!</b>\n\n📍 Маршрут: {from_loc} ➔ {to_loc}\n💰 Бағасы: {price}\n📞 Клиент нөмірі: {client_phone}", 
-            reply_markup=driver_kb, 
-            parse_mode="HTML"
-        )
-        await callback_query.answer("Тапсырыс қабылданды! Деректер ЛС-ке жіберілді.", show_alert=True)
-    except Exception as e:
-        logging.error(f"Не удалось отправить сообщение водителю: {e}")
-        await callback_query.answer("Тапсырыс қабылданды! Бірақ ботқа ЛС-де /start басыңыз.", show_alert=True)
+    await callback_query.answer("Тапсырыс қабылданды! Деректер ЛС-ке (жекеге) жіберілді.", show_alert=True)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА И ЗАПУСК ---
 async def handle_ping(request):
