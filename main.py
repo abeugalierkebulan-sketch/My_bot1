@@ -116,12 +116,20 @@ async def is_client_registered(user_id: int) -> bool:
         logging.error(f"Ошибка проверки клиента: {e}")
         return False
 
+# Вспомогательная функция для форматирования телефона
+def clean_phone_number(raw_phone: str) -> str:
+    digits = ''.join(filter(str.isdigit, str(raw_phone)))
+    if len(digits) == 10:
+        return "7" + digits
+    elif len(digits) == 11 and digits.startswith("8"):
+        return "7" + digits[1:]
+    return digits
+
 # --- СТАРТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     
-    # Проверяем зарегистрирован ли клиент
     if await is_client_registered(message.from_user.id):
         text = (
             f"Ассалаумағалейкум, <b>{message.from_user.first_name}</b>!\n\n"
@@ -130,7 +138,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
     else:
-        # Если НЕ зарегистрирован, запускаем регистрацию и НЕ даем главное меню
         await state.set_state(ClientRegister.full_name)
         text = (
             f"Ассалаумағалейкум, <b>{message.from_user.first_name}</b>!\n\n"
@@ -148,20 +155,16 @@ async def cancel_order(message: types.Message, state: FSMContext):
     else:
         await message.answer("Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
 
-# --- РЕГИСТРАЦИЯ КЛИЕНТА ---
+# --- РЕГИСТРАЦИЯ КЛИЕНТА (ТОЛЬКО РУЧНОЙ ВВОД ТЕЛЕФОНА) ---
 @dp.message(ClientRegister.full_name)
 async def process_client_name(message: types.Message, state: FSMContext):
     await state.update_data(client_full_name=message.text)
     await state.set_state(ClientRegister.phone)
-    phone_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Нөмірді жіберу", request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
-    await message.answer("📱 Байланыс телефоныңызды жіберіңіз немесе жазыңыз:", reply_markup=phone_kb)
+    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=types.ReplyKeyboardRemove())
 
 @dp.message(ClientRegister.phone)
 async def process_client_phone(message: types.Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text
+    phone = message.text
     data = await state.get_data()
     
     try:
@@ -175,8 +178,6 @@ async def process_client_phone(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка сохранения клиента: {e}")
 
     await state.clear()
-    
-    # ТОЛЬКО ПОСЛЕ РЕГИСТРАЦИИ ПОКАЗЫВАЕМ МЕНЮ
     await message.answer(
         "✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇",
         reply_markup=main_menu(),
@@ -213,16 +214,11 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
 async def process_driver_name(message: types.Message, state: FSMContext):
     await state.update_data(full_name=message.text)
     await state.set_state(DriverRegister.phone)
-    phone_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Нөмірді жіберу", request_contact=True)], [KeyboardButton(text="❌ Бас тарту")]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
-    await message.answer("📱 Байланыс телефоныңызды жіберіңіз:", reply_markup=phone_kb)
+    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=cancel_menu())
 
 @dp.message(DriverRegister.phone)
 async def process_driver_phone(message: types.Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text
-    await state.update_data(phone=phone)
+    await state.update_data(phone=message.text)
     await state.set_state(DriverRegister.car_info)
     await message.answer("🚘 Көлігіңіздің маркасы мен мемлекеттік нөмірін жазыңыз:", reply_markup=cancel_menu())
 
@@ -397,10 +393,10 @@ async def accept_order(callback_query: types.CallbackQuery):
     
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, order_type, from_loc, to_loc, price, phone, status FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT user_id, order_type, from_loc, to_loc, date_time, seats, price, phone, status FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
 
-    if not order or order[6] != 'new':
+    if not order or order[8] != 'new':
         await callback_query.answer("Тапсырыс бұрын алынған!", show_alert=True)
         conn.close()
         return
@@ -409,52 +405,69 @@ async def accept_order(callback_query: types.CallbackQuery):
     cursor.execute("SELECT full_name, phone, car_info FROM drivers WHERE user_id = ?", (driver.id,))
     driver_db = cursor.fetchone()
 
+    # Данные клиента из базы
+    client_id = order[0]
+    cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (client_id,))
+    client_db = cursor.fetchone()
+
     # Фиксируем принятие
     cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()
 
-    client_id, _, from_loc, to_loc, price, raw_client_phone = order[0], order[1], order[2], order[3], order[4], order[5]
+    order_type, from_loc, to_loc, date_time, seats, price, raw_client_phone = order[1], order[2], order[3], order[4], order[5], order[6], order[7]
 
-    # Форматируем телефон клиента
-    client_digits = ''.join(filter(str.isdigit, str(raw_client_phone)))
-    if len(client_digits) == 10:
-        clean_client_phone = "7" + client_digits
-    elif len(client_digits) == 11 and client_digits.startswith("8"):
-        clean_client_phone = "7" + client_digits[1:]
-    else:
-        clean_client_phone = client_digits
+    clean_client_phone = clean_phone_number(raw_client_phone)
+    client_name = client_db[0] if client_db else "Клиент"
 
-    # Формируем данные водителя
     driver_name = driver_db[0] if driver_db else driver.full_name
     driver_phone = driver_db[1] if driver_db else "Көрсетілмеген"
+    clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Карточка в группу
+    # 1. Обновляем сообщение В ГРУППЕ (БЕЗ номера телефона, БЕЗ кнопок)
     group_card_text = (
         f"✅ <b>ТАПСЫРЫС №{order_id} АЛЫНДЫ!</b>\n\n"
         f"📍 <b>Маршрут:</b> {from_loc} ➔ {to_loc}\n"
         f"💰 <b>Бағасы:</b> {price}\n"
-        f"👤 <b>Жүргізуші:</b> {driver_name}\n"
-        f"----------------------------\n"
-        f"📱 <b>Клиент нөмірі:</b> <code>+{clean_client_phone}</code>"
+        f"👤 <b>Жүргізуші:</b> {driver_name}"
     )
-    wa_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_client_phone}")]
-    ])
-
     try:
-        await callback_query.message.edit_text(group_card_text, reply_markup=wa_kb, parse_mode="HTML")
+        await callback_query.message.edit_text(group_card_text, reply_markup=None, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка обновления группы: {e}")
 
     await callback_query.answer("Тапсырысты алдыңыз!")
 
-    # 2. Карточка клиенту
+    # 2. Отправляем КАРТОЧКУ ТАКСИСТУ В ЛИЧКУ (со всеми данными клиента)
+    driver_pm_text = (
+        f"🚨 <b>СІЗ ҚАБЫЛДАҒАН ТАПСЫРЫС №{order_id}</b>\n\n"
+        f"👤 <b>Клиент:</b> {client_name}\n"
+        f"📍 <b>Қайдан:</b> {from_loc}\n"
+        f"🏁 <b>Қайда:</b> {to_loc}\n"
+    )
+    if order_type == 'intercity':
+        driver_pm_text += f"📅 <b>Уақыты:</b> {date_time}\n👥 <b>Орын:</b> {seats}\n"
+    
+    driver_pm_text += (
+        f"💰 <b>Бағасы:</b> {price}\n"
+        f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
+    )
+
+    wa_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_client_phone}")]
+    ])
+
+    try:
+        await bot.send_message(chat_id=driver.id, text=driver_pm_text, reply_markup=wa_kb, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки водителю в ЛС: {e}")
+
+    # 3. Отправляем карточку КЛИЕНТУ В ЛИЧКУ
     client_msg = (
         f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
-        f"📞 <b>Телефоны:</b> <code>{driver_phone}</code>\n"
+        f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_driver_phone}\">+{clean_driver_phone}</a>\n"
         f"🚘 <b>Көлігі:</b> {driver_car}\n\n"
         f"Жүргізуші сізбен жақында хабарласады."
     )
