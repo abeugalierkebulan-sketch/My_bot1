@@ -51,7 +51,7 @@ def init_db():
         )
     ''')
 
-    # Клиенты (Новая таблица)
+    # Клиенты
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clients (
             user_id INTEGER PRIMARY KEY,
@@ -69,7 +69,6 @@ init_db()
 class ClientRegister(StatesGroup):
     full_name = State()
     phone = State()
-    next_action = State() # 'city' или 'intercity'
 
 class OrderCity(StatesGroup):
     from_loc = State()
@@ -121,23 +120,17 @@ async def cancel_order(message: types.Message, state: FSMContext):
     await message.answer("Тоқтатылды.", reply_markup=main_menu())
 
 # --- ВСПУТАТЬ РЕГИСТРАЦИЮ КЛИЕНТА ПЕРЕД ЗАКАЗОМ ---
-async def check_or_register_client(message: types.Message, state: FSMContext, action_type: str):
-    conn = sqlite3.connect("joldas_taxi.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (message.from_user.id,))
-    client = cursor.fetchone()
-    conn.close()
-
-    if not client:
-        await state.set_state(ClientRegister.full_name)
-        await state.update_data(next_action=action_type)
-        await message.answer(
-            "👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):",
-            reply_markup=cancel_menu(),
-            parse_mode="HTML"
-        )
+async def check_client_registered(user_id: int) -> bool:
+    try:
+        conn = sqlite3.connect("joldas_taxi.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT full_name FROM clients WHERE user_id = ?", (user_id,))
+        client = cursor.fetchone()
+        conn.close()
+        return client is not None
+    except Exception as e:
+        logging.error(f"Ошибка проверки клиента: {e}")
         return False
-    return True
 
 # --- РЕГИСТРАЦИЯ КЛИЕНТА (ШАГИ) ---
 @dp.message(ClientRegister.full_name)
@@ -155,24 +148,18 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
     data = await state.get_data()
     
-    conn = sqlite3.connect("joldas_taxi.db")
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO clients (user_id, full_name, phone) VALUES (?, ?, ?)",
-                   (message.from_user.id, data['client_full_name'], phone))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect("joldas_taxi.db")
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO clients (user_id, full_name, phone) VALUES (?, ?, ?)",
+                       (message.from_user.id, data.get('client_full_name', 'Клиент'), phone))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка сохранения клиента: {e}")
 
-    next_action = data.get('next_action')
-    await message.answer("✅ <b>Сіз сәтті тіркелдіңіз!</b>", parse_mode="HTML")
-
-    if next_action == "city":
-        await state.set_state(OrderCity.from_loc)
-        await message.answer("📍 <b>Қайдан алып кетейік?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
-    elif next_action == "intercity":
-        await state.set_state(OrderIntercity.from_loc)
-        await message.answer("📍 <b>Қай қаладан / ауылдан шығасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
-    else:
-        await state.clear()
+    await state.clear()
+    await message.answer("✅ <b>Сіз тіркелдіңіз!</b> Енді қайтадан керекті батырманы таңдаңыз 👇", reply_markup=main_menu(), parse_mode="HTML")
 
 # --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болу")
@@ -265,10 +252,11 @@ async def auto_approve_driver(chat_join_request: ChatJoinRequest):
 # --- 1. ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
 async def start_city_order(message: types.Message, state: FSMContext):
-    is_registered = await check_or_register_client(message, state, "city")
-    if not is_registered:
+    if not await check_client_registered(message.from_user.id):
+        await state.set_state(ClientRegister.full_name)
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
         return
-    
+
     await state.set_state(OrderCity.from_loc)
     await message.answer("📍 <b>Қайдан алып кетейік?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
 
@@ -289,12 +277,11 @@ async def process_city_price(message: types.Message, state: FSMContext):
     price = message.text
     data = await state.get_data()
     
-    # Берем телефон из базы зарегистрированных клиентов
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
     client = cursor.fetchone()
-    phone = client[0] if client else "Незвестно"
+    phone = client[0] if client else "Көрсетілмеген"
 
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, price, phone, status) VALUES (?, 'city', ?, ?, ?, ?, 'new')",
                    (message.from_user.id, data['from_loc'], data['to_loc'], price, phone))
@@ -317,8 +304,9 @@ async def process_city_price(message: types.Message, state: FSMContext):
 # --- 2. ЗАКАЗ МЕЖГОРОД ---
 @dp.message(F.text == "🛣 Қалааралық (Межгород)")
 async def start_intercity_order(message: types.Message, state: FSMContext):
-    is_registered = await check_or_register_client(message, state, "intercity")
-    if not is_registered:
+    if not await check_client_registered(message.from_user.id):
+        await state.set_state(ClientRegister.full_name)
+        await message.answer("👤 <b>Тапсырыс беру үшін алдымен тіркелу қажет!</b>\n\nТолық аты-жөніңізді жазыңыз (ФИО):", reply_markup=cancel_menu(), parse_mode="HTML")
         return
 
     await state.set_state(OrderIntercity.from_loc)
@@ -353,12 +341,11 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     price = message.text
     data = await state.get_data()
     
-    # Берем телефон из базы зарегистрированных клиентов
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
     client = cursor.fetchone()
-    phone = client[0] if client else "Неизвестно"
+    phone = client[0] if client else "Көрсетілмеген"
 
     cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, date_time, seats, price, phone, status) VALUES (?, 'intercity', ?, ?, ?, ?, ?, ?, 'new')",
                    (message.from_user.id, data['from_loc'], data['to_loc'], data['date_time'], data['seats'], price, phone))
