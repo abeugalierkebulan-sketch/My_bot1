@@ -159,10 +159,16 @@ async def auto_approve_driver(chat_join_request: ChatJoinRequest):
 
     if driver:
         await chat_join_request.approve()
-        await bot.send_message(chat_id=user_id, text="✅ <b>Жолдас такси:</b> Өтінішіңіз автоматты түрде қабылданды!", parse_mode="HTML")
+        try:
+            await bot.send_message(chat_id=user_id, text="✅ <b>Жолдас такси:</b> Өтінішіңіз автоматты түрде қабылданды!", parse_mode="HTML")
+        except Exception:
+            pass
     else:
         await chat_join_request.decline()
-        await bot.send_message(chat_id=user_id, text="❌ <b>Топқа кіруге рұқсат берілмеді!</b> Алдымен боттан тіркеліңіз.", parse_mode="HTML")
+        try:
+            await bot.send_message(chat_id=user_id, text="❌ <b>Топқа кіруге рұқсат берілмеді!</b> Алдымен боттан тіркеліңіз.", parse_mode="HTML")
+        except Exception:
+            pass
 
 # --- 1. ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
@@ -275,6 +281,7 @@ async def process_inter_phone(message: types.Message, state: FSMContext):
 async def accept_order(callback_query: types.CallbackQuery):
     order_id = callback_query.data.split('_')[1]
     driver = callback_query.from_user
+    
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("SELECT user_id, order_type, from_loc, to_loc, price, phone, status FROM orders WHERE id = ?", (order_id,))
@@ -290,21 +297,48 @@ async def accept_order(callback_query: types.CallbackQuery):
     conn.close()
 
     client_id, _, from_loc, to_loc, price, client_phone = order[0], order[1], order[2], order[3], order[4], order[5]
-    await callback_query.message.edit_text(f"{callback_query.message.text}\n\n✅ <b>ТАПСЫРЫС АЛЫНДЫ!</b>\nЖүргізуші: {driver.full_name}", parse_mode="HTML")
+    
+    # 1. Обновляем карточку в супергруппе
+    await callback_query.message.edit_text(
+        f"{callback_query.message.text}\n\n✅ <b>ТАПСЫРЫС АЛЫНДЫ!</b>\nЖүргізуші: {driver.full_name}", 
+        parse_mode="HTML"
+    )
 
+    # 2. Уведомляем клиента в ЛС
+    try:
+        await bot.send_message(
+            chat_id=client_id, 
+            text=f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\nЖүргізуші: <b>{driver.full_name}</b>\nКүте турыңыз, сізбен байланысады.", 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить сообщение клиенту: {e}")
+
+    # 3. Отправляем детали заказа водителю в ЛС
     clean_phone = ''.join(filter(str.isdigit, client_phone))
     driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{clean_phone}"), InlineKeyboardButton(text="📞 Қоңырау", url=f"tel:+{clean_phone}")]
+        [InlineKeyboardButton(text="💬 WhatsApp", url=f"https://wa.me/{clean_phone}"), 
+         InlineKeyboardButton(text="📞 Қоңырау", url=f"tel:+{clean_phone}")]
     ])
-    await bot.send_message(chat_id=driver.id, text=f"✅ <b>Заказ №{order_id} қабылданды!</b>\n\nМаршрут: {from_loc} ➔ {to_loc}\nТел: {client_phone}", reply_markup=driver_kb, parse_mode="HTML")
-    await bot.send_message(chat_id=client_id, text=f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\nЖүргізуші: {driver.full_name}", parse_mode="HTML")
+    
+    try:
+        await bot.send_message(
+            chat_id=driver.id, 
+            text=f"✅ <b>Заказ №{order_id} қабылданды!</b>\n\n📍 Маршрут: {from_loc} ➔ {to_loc}\n💰 Бағасы: {price}\n📞 Клиент нөмірі: {client_phone}", 
+            reply_markup=driver_kb, 
+            parse_mode="HTML"
+        )
+        await callback_query.answer("Тапсырыс қабылданды! Деректер ЛС-ке жіберілді.", show_alert=True)
+    except Exception as e:
+        logging.error(f"Не удалось отправить сообщение водителю: {e}")
+        await callback_query.answer("Тапсырыс қабылданды! Бірақ ботқа ЛС-де /start басыңыз.", show_alert=True)
 
 # --- ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА И ЗАПУСК ---
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
 
 async def main():
-    # Создаем dummy сервер, чтобы Render не выдавал ошибку про 'No open ports'
+    # Запускаем dummy веб-сервер для порта на Render Web Service
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -313,7 +347,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    # Удаляем вебхуки, чтобы убрать ошибку TelegramConflictError
+    # Сбрасываем старые вебхуки для предотвращения конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
