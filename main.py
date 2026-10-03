@@ -3,6 +3,7 @@ import re
 import logging
 import sqlite3
 import asyncio
+from aiohttp import web  # Обязательно для Web Service на Render!
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -27,6 +28,21 @@ logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+# --- ДУММИ-СЕРВЕР ДЛЯ РЕНДЕРА (чтобы Web Service не падал) ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    app.router.add_get('/health', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info(f"Dummy Web Server запущен на порту {port}")
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -385,10 +401,10 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Быстрый ответ без переноса фокуса
+    # 1. Быстрое уведомление сверху
     await callback_query.answer("✅ Тапсырыс қабылданды! Ботты ашыңыз.")
 
-    # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ (Полностью удаляем кнопки)
+    # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ (Без кнопок)
     order_label = "📦 ЖЕТКІЗУ (ДОСТАВКА)" if order_type == 'delivery' else "🚖 ТАПСЫРЫС"
     group_card_text = (
         f"✅ <b>{order_label} №{order_id} АЛЫНДЫ!</b>\n\n"
@@ -402,7 +418,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка обновления группы: {e}")
 
-    # Важная задержка 0.5с: завершает событие клика, чтобы Telegram прислал сообщение как НЕПРОЧИТАННОЕ
+    # Задержка 0.5с для Telegram
     await asyncio.sleep(0.5)
 
     # 3. КАРТОЧКА ВОДИТЕЛЮ В ЛС
@@ -460,9 +476,13 @@ async def accept_order(callback_query: types.CallbackQuery):
         logging.error(f"Ошибка отправки клиенту: {e}")
 
 
-# --- ЗАПУСК БОТА ---
+# --- ЗАПУСК БОТА И ДУММИ-СЕРВЕРА ---
 async def main():
-    print("Бот успешно запущен!")
+    # Запускаем лёгкий веб-сервер для Render
+    await start_web_server()
+    # Сбрасываем старые зависшие вебхуки, чтобы не было конфликтов
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("Бот и Web-сервер успешно запущены!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
