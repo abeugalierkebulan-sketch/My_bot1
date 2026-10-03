@@ -1,6 +1,8 @@
+import os
+import re
 import logging
 import sqlite3
-import re
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -11,9 +13,15 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 )
 
-# --- НАСТРОЙКИ (Замените на свои данные) ---
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
-GROUP_ID = -1001234567890  # ID вашей Telegram группы (начинается с -100)
+# --- ПОЛУЧЕНИЕ ПЕРЕМЕННЫХ ИЗ RENDER (Environment Variables) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")
+
+if not BOT_TOKEN:
+    raise ValueError("ОШИБКА: Переменная BOT_TOKEN не найдена в Environment Variables!")
+
+if GROUP_ID:
+    GROUP_ID = int(GROUP_ID)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -25,7 +33,6 @@ def init_db():
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     
-    # Таблица клиентов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             user_id INTEGER PRIMARY KEY,
@@ -34,7 +41,6 @@ def init_db():
         )
     """)
     
-    # Таблица водителей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS drivers (
             user_id INTEGER PRIMARY KEY,
@@ -44,7 +50,6 @@ def init_db():
         )
     """)
     
-    # Таблица заказов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,7 +73,7 @@ init_db()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone_number(phone: str) -> str:
-    """Очищает номер телефона, оставляя только цифры без плюса (для tel: и wa.me)"""
+    """Очищает номер телефона для tel: и wa.me"""
     digits = re.sub(r'\D', '', phone)
     if digits.startswith('8') and len(digits) == 11:
         digits = '7' + digits[1:]
@@ -142,7 +147,6 @@ async def cmd_start(message: types.Message):
         reply_markup=main_menu_kb()
     )
 
-# --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(F.text == "👤 Клиент болып тіркелу")
 async def start_client_reg(message: types.Message, state: FSMContext):
     await state.set_state(ClientRegisterGroup.name)
@@ -169,7 +173,6 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Тіркелу сәтті аяқталды!", reply_markup=main_menu_kb())
 
-# --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болып тіркелу")
 async def start_driver_reg(message: types.Message, state: FSMContext):
     await state.set_state(DriverRegisterGroup.name)
@@ -289,7 +292,6 @@ async def process_price(message: types.Message, state: FSMContext):
     await state.update_data(phone=phone)
     data = await state.get_data()
 
-    # Сохраняем заказ в БД
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -311,7 +313,6 @@ async def process_price(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
 
-    # Оформляем текст карточки в группу
     if data['order_type'] == 'delivery':
         card_text = (
             f"📦 <b>ЖАҢА ЖЕТКІЗУ №{order_id}</b>\n\n"
@@ -322,7 +323,7 @@ async def process_price(message: types.Message, state: FSMContext):
             f"💰 <b>Ақысы:</b> {data.get('price')}\n"
         )
     else:
-        type_str = "🏙️️ ҚАЛА ІШІ" if data['order_type'] == 'city' else "🚘 ҚАЛААРАЛЫҚ"
+        type_str = "🏙 ҚАЛА ІШІ" if data['order_type'] == 'city' else "🚘 ҚАЛААРАЛЫҚ"
         card_text = (
             f"🚖 <b>ЖАҢА ТАПСЫРЫС №{order_id} ({type_str})</b>\n\n"
             f"📍 <b>Қайдан:</b> {data.get('from_loc')}\n"
@@ -337,13 +338,12 @@ async def process_price(message: types.Message, state: FSMContext):
         [InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]
     ])
 
-    # Отправляем карточку в группу
     try:
         await bot.send_message(chat_id=GROUP_ID, text=card_text, reply_markup=accept_kb, parse_mode="HTML")
         await message.answer("✅ Тапсырысыңыз топқа жіберілді! Жүргізуші қабылдағанда сізге хабарлама келеді.", reply_markup=main_menu_kb())
     except Exception as e:
         logging.error(f"Ошибка отправки в группу: {e}")
-        await message.answer("⚠️ Қате: Топқа хабарлама жіберілмеді. Бот топқа қосылғанын тексеріңіз.", reply_markup=main_menu_kb())
+        await message.answer("⚠️ Қате: Топқа хабарлама жіберілмеді.", reply_markup=main_menu_kb())
 
     await state.clear()
 
@@ -359,13 +359,11 @@ async def accept_order(callback_query: types.CallbackQuery):
     cursor.execute("SELECT user_id, order_type, delivery_type, item_info, from_loc, to_loc, date_time, seats, price, phone, status FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
 
-    # Проверка: если заказ уже кто-то взял
     if not order or order[10] != 'new':
         await callback_query.answer("⚠️ Бұл тапсырысты басқа жүргізуші алып қойған!", show_alert=True)
         conn.close()
         return
 
-    # Получаем данные водителя и клиента
     cursor.execute("SELECT full_name, phone, car_info FROM drivers WHERE user_id = ?", (driver.id,))
     driver_db = cursor.fetchone()
 
@@ -373,7 +371,6 @@ async def accept_order(callback_query: types.CallbackQuery):
     cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (client_id,))
     client_db = cursor.fetchone()
 
-    # Обновляем статус заказа
     cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()
@@ -388,10 +385,10 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Быстрое всплывающее уведомление сверху экрана
+    # 1. Быстрый ответ без переноса фокуса
     await callback_query.answer("✅ Тапсырыс қабылданды! Ботты ашыңыз.")
 
-    # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ (Удаляем все кнопки)
+    # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ (Полностью удаляем кнопки)
     order_label = "📦 ЖЕТКІЗУ (ДОСТАВКА)" if order_type == 'delivery' else "🚖 ТАПСЫРЫС"
     group_card_text = (
         f"✅ <b>{order_label} №{order_id} АЛЫНДЫ!</b>\n\n"
@@ -401,12 +398,14 @@ async def accept_order(callback_query: types.CallbackQuery):
     )
 
     try:
-        # reply_markup=None полностью убирает кнопки из группы
         await callback_query.message.edit_text(group_card_text, reply_markup=None, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка обновления группы: {e}")
 
-    # 3. КАРТОЧКА ВОДИТЕЛЮ В ЛС (Приходит как НЕПРОЧИТАННОЕ со звуковым сигналом)
+    # Важная задержка 0.5с: завершает событие клика, чтобы Telegram прислал сообщение как НЕПРОЧИТАННОЕ
+    await asyncio.sleep(0.5)
+
+    # 3. КАРТОЧКА ВОДИТЕЛЮ В ЛС
     if order_type == 'delivery':
         driver_pm_text = (
             f"🔔 <b>СІЗ ҚАБЫЛДАҒАН ЖЕТКІЗУ №{order_id}</b>\n\n"
@@ -467,5 +466,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
