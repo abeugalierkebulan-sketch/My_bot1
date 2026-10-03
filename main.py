@@ -3,7 +3,7 @@ import re
 import logging
 import sqlite3
 import asyncio
-from aiohttp import web  # Обязательно для Web Service на Render!
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -14,12 +14,11 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 )
 
-# --- ПОЛУЧЕНИЕ ПЕРЕМЕННЫХ ИЗ RENDER (Environment Variables) ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = os.getenv("GROUP_ID")
 
 if not BOT_TOKEN:
-    raise ValueError("ОШИБКА: Переменная BOT_TOKEN не найдена в Environment Variables!")
+    raise ValueError("ОШИБКА: Переменная BOT_TOKEN не найдена!")
 
 if GROUP_ID:
     GROUP_ID = int(GROUP_ID)
@@ -29,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- ДУММИ-СЕРВЕР ДЛЯ РЕНДЕРА (чтобы Web Service не падал) ---
+# --- ДУММИ-СЕРВЕР ДЛЯ RENDER WEB SERVICE ---
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
 
@@ -87,15 +86,13 @@ def init_db():
 
 init_db()
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def clean_phone_number(phone: str) -> str:
-    """Очищает номер телефона для tel: и wa.me"""
     digits = re.sub(r'\D', '', phone)
     if digits.startswith('8') and len(digits) == 11:
         digits = '7' + digits[1:]
     return digits
 
-# --- СОСТОЯНИЯ (FSM) ---
+# --- FSM ---
 class ClientRegisterGroup(StatesGroup):
     name = State()
     phone = State()
@@ -136,7 +133,7 @@ def phone_kb():
 def order_type_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🏙️ Қала іші (Город)")],
+            [KeyboardButton(text="🏙️️ Қала іші (Город)")],
             [KeyboardButton(text="🚘 Қалааралық (Межгород)")],
             [KeyboardButton(text="📦 Жеткізу (Доставка)")]
         ],
@@ -154,7 +151,7 @@ def delivery_type_kb():
         one_time_keyboard=True
     )
 
-# --- СТАРТ И РЕГИСТРАЦИЯ ---
+# --- ХЭНДЛЕРЫ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
@@ -221,7 +218,6 @@ async def process_driver_car(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Жүргізуші болып сәтті тіркелдіңіз!", reply_markup=main_menu_kb())
 
-# --- СОЗДАНИЕ ЗАКАЗА ---
 @dp.message(F.text == "🚕 Тапсырыс беру (Заказать)")
 async def start_order(message: types.Message, state: FSMContext):
     conn = sqlite3.connect("joldas_taxi.db")
@@ -363,8 +359,6 @@ async def process_price(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-
-# --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_order(callback_query: types.CallbackQuery):
     order_id = callback_query.data.split('_')[1]
@@ -401,10 +395,8 @@ async def accept_order(callback_query: types.CallbackQuery):
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
-    # 1. Быстрое уведомление сверху
     await callback_query.answer("✅ Тапсырыс қабылданды! Ботты ашыңыз.")
 
-    # 2. ОБНОВЛЕНИЕ КАРТОЧКИ В ГРУППЕ (Без кнопок)
     order_label = "📦 ЖЕТКІЗУ (ДОСТАВКА)" if order_type == 'delivery' else "🚖 ТАПСЫРЫС"
     group_card_text = (
         f"✅ <b>{order_label} №{order_id} АЛЫНДЫ!</b>\n\n"
@@ -418,10 +410,8 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка обновления группы: {e}")
 
-    # Задержка 0.5с для Telegram
     await asyncio.sleep(0.5)
 
-    # 3. КАРТОЧКА ВОДИТЕЛЮ В ЛС
     if order_type == 'delivery':
         driver_pm_text = (
             f"🔔 <b>СІЗ ҚАБЫЛДАҒАН ЖЕТКІЗУ №{order_id}</b>\n\n"
@@ -462,7 +452,6 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки водителю: {e}")
 
-    # 4. УВЕДОМЛЕНИЕ КЛИЕНТУ В ЛС
     client_msg = (
         f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
@@ -475,12 +464,8 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки клиенту: {e}")
 
-
-# --- ЗАПУСК БОТА И ДУММИ-СЕРВЕРА ---
 async def main():
-    # Запускаем лёгкий веб-сервер для Render
     await start_web_server()
-    # Сбрасываем старые зависшие вебхуки, чтобы не было конфликтов
     await bot.delete_webhook(drop_pending_updates=True)
     print("Бот и Web-сервер успешно запущены!")
     await dp.start_polling(bot)
