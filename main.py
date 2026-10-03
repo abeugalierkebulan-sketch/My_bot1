@@ -2,6 +2,7 @@ import os
 import sqlite3
 import logging
 import asyncio
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -16,6 +17,9 @@ API_TOKEN = os.getenv("BOT_TOKEN")
 
 CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "-1004350443552"))
 INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "-1003756709241"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) # Telegram ID администратора
+
+COMMISSION_PERCENT = 10 # Процент комиссии от заказа (10%)
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -47,9 +51,16 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             full_name TEXT,
             phone TEXT,
-            car_info TEXT
+            car_info TEXT,
+            balance REAL DEFAULT 0.0
         )
     ''')
+
+    # Проверка на наличие столбца balance (если база уже создана)
+    cursor.execute("PRAGMA table_info(drivers)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'balance' not in columns:
+        cursor.execute("ALTER TABLE drivers ADD COLUMN balance REAL DEFAULT 0.0")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clients (
@@ -94,15 +105,17 @@ class DriverRegister(StatesGroup):
     car_info = State()
 
 # --- МЕНЮ ---
-def main_menu():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
-            [KeyboardButton(text="📦 Жеткізу (Доставка)"), KeyboardButton(text="🚖 Жүргізуші болу")],
-            [KeyboardButton(text="📞 Қолдау қызметі")]
-        ],
-        resize_keyboard=True
-    )
+def main_menu(user_id: int = None):
+    keyboard = [
+        [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
+        [KeyboardButton(text="📦 Жеткізу (Доставка)"), KeyboardButton(text="🚖 Жүргізуші болу")],
+        [KeyboardButton(text="📞 Қолдау қызметі")]
+    ]
+    
+    if user_id and is_driver_registered(user_id):
+        keyboard.append([KeyboardButton(text="💰 Менің балансым")])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 def delivery_menu():
     return ReplyKeyboardMarkup(
@@ -118,6 +131,18 @@ def cancel_menu():
         keyboard=[[KeyboardButton(text="❌ Бас тарту")]],
         resize_keyboard=True
     )
+
+def is_driver_registered(user_id: int) -> bool:
+    try:
+        conn = sqlite3.connect("joldas_taxi.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM drivers WHERE user_id = ?", (user_id,))
+        driver = cursor.fetchone()
+        conn.close()
+        return driver is not None
+    except Exception as e:
+        logging.error(f"Ошибка проверки водителя: {e}")
+        return False
 
 async def is_client_registered(user_id: int) -> bool:
     try:
@@ -139,6 +164,12 @@ def clean_phone_number(raw_phone: str) -> str:
         return "7" + digits[1:]
     return digits
 
+def parse_price(price_str: str) -> float:
+    digits = re.findall(r'\d+', str(price_str))
+    if digits:
+        return float(''.join(digits))
+    return 0.0
+
 # --- СТАРТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -149,7 +180,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             f"🚖 <b>«Жолдас такси»</b> ботына қош келдіңіз!\n\n"
             f"Керекті бөлімді таңдаңыз 👇"
         )
-        await message.answer(text, reply_markup=main_menu(), parse_mode="HTML")
+        await message.answer(text, reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
     else:
         await state.set_state(ClientRegister.full_name)
         text = (
@@ -164,9 +195,64 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cancel_order(message: types.Message, state: FSMContext):
     await state.clear()
     if await is_client_registered(message.from_user.id):
-        await message.answer("❌ Тоқтатылды.", reply_markup=main_menu())
+        await message.answer("❌ Тоқтатылды.", reply_markup=main_menu(message.from_user.id))
     else:
         await message.answer("❌ Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
+
+# --- БАЛАНС ВОДИТЕЛЯ И ПОПОЛНЕНИЕ ---
+@dp.message(F.text == "💰 Менің балансым")
+async def show_driver_balance(message: types.Message):
+    conn = sqlite3.connect("joldas_taxi.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (message.from_user.id,))
+    res = cursor.fetchone()
+    conn.close()
+
+    if res:
+        balance = res[0]
+        text = (
+            f"💰 <b>Сіздің балансыңыз:</b> {balance:.0f} ₸\n\n"
+            f"🆔 <b>Сіздің ID-іңіз:</b> <code>{message.from_user.id}</code>\n\n"
+            f"📌 Балансты толтыру үшін диспетчерге/админге ID-іңізді жіберіңіз."
+        )
+        await message.answer(text, parse_mode="HTML")
+    else:
+        await message.answer("❌ Сіз жүргізуші ретінде тіркелмегенсіз.")
+
+@dp.message(Command("pay"))
+async def admin_topup_balance(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        args = message.text.split()
+        target_id = int(args[1])
+        amount = float(args[2])
+
+        conn = sqlite3.connect("joldas_taxi.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+        driver = cursor.fetchone()
+
+        if not driver:
+            await message.answer("❌ Жүргізуші табылмады!")
+            conn.close()
+            return
+
+        new_balance = driver[0] + amount
+        cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+        conn.commit()
+        conn.close()
+
+        await message.answer(f"✅ ID {target_id} жүргізушіге {amount} ₸ толтырылды! Жаңа баланс: {new_balance:.0f} ₸")
+        
+        try:
+            await bot.send_message(chat_id=target_id, text=f"🎉 <b>Балансыңыз толтырылды!</b>\n➕ Қосылды: {amount} ₸\n💰 Ағымдағы баланс: {new_balance:.0f} ₸", parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Не удалось отправить уведомление водителю: {e}")
+
+    except Exception:
+        await message.answer("❌ Формат қате! Қолдану: `/pay USER_ID SUMMA`\nМысалы: `/pay 123456789 1000`", parse_mode="Markdown")
 
 # --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(ClientRegister.full_name)
@@ -190,7 +276,7 @@ async def process_client_phone(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка сохранения клиента: {e}")
 
     await state.clear()
-    await message.answer("✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇", reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer("✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
 # --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болу")
@@ -235,8 +321,8 @@ async def process_driver_car(message: types.Message, state: FSMContext):
     data = await state.get_data()
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO drivers (user_id, full_name, phone, car_info) VALUES (?, ?, ?, ?)',
-                   (message.from_user.id, data['full_name'], data['phone'], message.text))
+    cursor.execute('INSERT OR REPLACE INTO drivers (user_id, full_name, phone, car_info, balance) VALUES (?, ?, ?, ?, COALESCE((SELECT balance FROM drivers WHERE user_id = ?), 0.0))',
+                   (message.from_user.id, data['full_name'], data['phone'], message.text, message.from_user.id))
     conn.commit()
     conn.close()
     await state.clear()
@@ -251,7 +337,7 @@ async def process_driver_car(message: types.Message, state: FSMContext):
         await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\nТоптарға қосылыңыз 👇", reply_markup=group_kb, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка сгенерировать ссылки: {e}")
-        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>", reply_markup=main_menu(), parse_mode="HTML")
+        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
 @dp.chat_join_request()
 async def auto_approve_driver(chat_join_request: ChatJoinRequest):
@@ -322,7 +408,7 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
-    await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
     if dtype == "city":
         type_title = "ҚАЛА ІШІНДЕ"
@@ -381,7 +467,7 @@ async def process_city_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
-    await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n"
@@ -444,7 +530,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
-    await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(), parse_mode="HTML")
+    await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
 
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛААРАЛЫҚ №{order_id}</b>\n\n"
@@ -465,6 +551,16 @@ async def accept_order(callback_query: types.CallbackQuery):
     
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
+
+    # Проверка регистрации и баланса водителя
+    cursor.execute("SELECT full_name, phone, car_info, balance FROM drivers WHERE user_id = ?", (driver.id,))
+    driver_db = cursor.fetchone()
+
+    if not driver_db:
+        await callback_query.answer("❌ Тапсырысты алу үшін алдымен ботта жүргізуші болып тіркеліңіз!", show_alert=True)
+        conn.close()
+        return
+
     cursor.execute("SELECT user_id, order_type, delivery_type, item_info, from_loc, to_loc, date_time, seats, price, phone, status FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
 
@@ -473,8 +569,18 @@ async def accept_order(callback_query: types.CallbackQuery):
         conn.close()
         return
 
-    cursor.execute("SELECT full_name, phone, car_info FROM drivers WHERE user_id = ?", (driver.id,))
-    driver_db = cursor.fetchone()
+    price_val = parse_price(order[8])
+    commission = (price_val * COMMISSION_PERCENT) / 100
+    driver_balance = driver_db[3]
+
+    if driver_balance < commission:
+        await callback_query.answer(f"❌ Балансыңыз жеткіліксіз!\nТапсырыс комиссиясы: {commission:.0f} ₸\nБалансыңыз: {driver_balance:.0f} ₸\nБалансты толтырыңыз.", show_alert=True)
+        conn.close()
+        return
+
+    # Списание комиссии
+    new_balance = driver_balance - commission
+    cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, driver.id))
 
     client_id = order[0]
     cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (client_id,))
@@ -518,6 +624,8 @@ async def accept_order(callback_query: types.CallbackQuery):
             f"📍 <b>Қайдан алып кету:</b> {from_loc}\n"
             f"🏁 <b>Қайда жеткізу:</b> {to_loc}\n"
             f"💰 <b>Жеткізу ақысы:</b> {price}\n"
+            f"💸 <b>Комиссия ұсталды:</b> {commission:.0f} ₸\n"
+            f"💳 <b>Қалған баланс:</b> {new_balance:.0f} ₸\n"
             f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
         )
     else:
@@ -532,6 +640,8 @@ async def accept_order(callback_query: types.CallbackQuery):
         
         driver_pm_text += (
             f"💰 <b>Жол ақысы:</b> {price}\n"
+            f"💸 <b>Комиссия ұсталды:</b> {commission:.0f} ₸\n"
+            f"💳 <b>Қалған баланс:</b> {new_balance:.0f} ₸\n"
             f"📞 <b>Телефоны:</b> <a href=\"tel:+{clean_client_phone}\">+{clean_client_phone}</a>"
         )
 
