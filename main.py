@@ -13,11 +13,13 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
+# Берем настройки из Environment Variables (Render)
 API_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) # Telegram ID администратора
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").replace("@", "") # Юзернейм админа без @
 
 CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "-1004350443552"))
 INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "-1003756709241"))
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) # Telegram ID администратора
 
 COMMISSION_PERCENT = 10 # Процент комиссии от заказа (10%)
 
@@ -112,7 +114,7 @@ def main_menu(user_id: int = None):
     keyboard = [
         [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
         [KeyboardButton(text="📦 Жеткізу (Доставка)"), KeyboardButton(text="🚖 Жүргізуші болу")],
-        [KeyboardButton(text="📞 Қолдау қызметі")]
+        [KeyboardButton(text="📞 Қолдау қызметі (Админге жазу)")]
     ]
     
     if user_id and is_driver_registered(user_id):
@@ -202,6 +204,19 @@ async def cancel_order(message: types.Message, state: FSMContext):
     else:
         await message.answer("❌ Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
 
+# --- КНОПКА ПОДДЕРЖКИ (АДМИН) ---
+@dp.message(F.text == "📞 Қолдау қызметі (Админге жазу)")
+async def support_contact(message: types.Message):
+    url = f"https://t.me/{ADMIN_USERNAME}" if ADMIN_USERNAME else f"tg://user?id={ADMIN_ID}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Админге жазу (ЛС)", url=url)]
+    ])
+    text = (
+        f"📞 <b>Қолдау қызметі</b>\n\n"
+        f"Сұрақтарыңыз немесе ұсыныстарыңыз болса, төмендегі батырманы басып админге жаза аласыз 👇"
+    )
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
 # --- БАЛАНС И ПОПОЛНЕНИЕ ВОДИТЕЛЯ ---
 @dp.message(F.text == "💰 Менің балансым")
 async def show_driver_balance(message: types.Message):
@@ -230,7 +245,7 @@ async def request_topup_receipt(message: types.Message, state: FSMContext):
     await state.set_state(TopupState.waiting_for_receipt)
     text = (
         f"💳 <b>Балансты Kaspi арқылы толтыру:</b>\n\n"
-        f"1. Kaspi арқылы мына номерге аударыңыз: <b>+7 70X XXX XX XX</b> (немесе Kaspi Pay)\n"
+        f"1. Kaspi арқылы мына номерге аударыңыз: <b>+7 775 699 63 09 (Еркебұлан Ә.)</b>\n"
         f"2. Төлем жасап болған соң, <b>чектің суретін (скриншот) немесе файлын дәл осы чатқа жіберіңіз</b> 👇"
     )
     await message.answer(text, reply_markup=cancel_menu(), parse_mode="HTML")
@@ -519,7 +534,7 @@ async def auto_approve_driver(chat_join_request: ChatJoinRequest):
     else:
         await chat_join_request.decline()
 
-# --- 3. ЗАКАЗ ДОСТАВКИ (ГОРОД + МЕЖГОРОД) ---
+# --- ЗАКАЗ ДОСТАВКИ ---
 @dp.message(F.text == "📦 Жеткізу (Доставка)")
 async def start_delivery_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
@@ -594,7 +609,7 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
 
-# --- 1. ЗАКАЗ ПО ГОРОДУ ---
+# --- ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
 async def start_city_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
@@ -645,7 +660,7 @@ async def process_city_price(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
     await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
 
-# --- 2. ЗАКАЗ МЕЖГОРОД ---
+# --- ЗАКАЗ МЕЖГОРОД ---
 @dp.message(F.text == "🛣 Қалааралық (Межгород)")
 async def start_intercity_order(message: types.Message, state: FSMContext):
     if not await is_client_registered(message.from_user.id):
