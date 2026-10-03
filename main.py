@@ -56,7 +56,6 @@ def init_db():
         )
     ''')
 
-    # Проверка на наличие столбца balance (если база уже создана)
     cursor.execute("PRAGMA table_info(drivers)")
     columns = [column[1] for column in cursor.fetchall()]
     if 'balance' not in columns:
@@ -93,16 +92,20 @@ class OrderIntercity(StatesGroup):
     price = State()
 
 class OrderDelivery(StatesGroup):
-    delivery_type = State() # 'city' или 'intercity'
-    item_info = State()     # Что именно доставить
-    from_loc = State()      # Откуда забрать
-    to_loc = State()        # Куда доставить
-    price = State()         # Цена
+    delivery_type = State()
+    item_info = State()
+    from_loc = State()
+    to_loc = State()
+    price = State()
 
 class DriverRegister(StatesGroup):
     full_name = State()
     phone = State()
     car_info = State()
+
+class TopupState(StatesGroup):
+    waiting_for_receipt = State()
+    waiting_custom_amount = State()
 
 # --- МЕНЮ ---
 def main_menu(user_id: int = None):
@@ -113,7 +116,7 @@ def main_menu(user_id: int = None):
     ]
     
     if user_id and is_driver_registered(user_id):
-        keyboard.append([KeyboardButton(text="💰 Менің балансым")])
+        keyboard.append([KeyboardButton(text="💰 Менің балансым"), KeyboardButton(text="💳 Баланс толтыру")])
 
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -199,7 +202,7 @@ async def cancel_order(message: types.Message, state: FSMContext):
     else:
         await message.answer("❌ Тоқтатылды. Қайта бастау үшін /start басыңыз.", reply_markup=types.ReplyKeyboardRemove())
 
-# --- БАЛАНС ВОДИТЕЛЯ И ПОПОЛНЕНИЕ ---
+# --- БАЛАНС И ПОПОЛНЕНИЕ ВОДИТЕЛЯ ---
 @dp.message(F.text == "💰 Менің балансым")
 async def show_driver_balance(message: types.Message):
     conn = sqlite3.connect("joldas_taxi.db")
@@ -212,12 +215,169 @@ async def show_driver_balance(message: types.Message):
         balance = res[0]
         text = (
             f"💰 <b>Сіздің балансыңыз:</b> {balance:.0f} ₸\n\n"
-            f"🆔 <b>Сіздің ID-іңіз:</b> <code>{message.from_user.id}</code>\n\n"
-            f"📌 Балансты толтыру үшін диспетчерге/админге ID-іңізді жіберіңіз."
+            f"📌 Балансты толтыру үшін «💳 Баланс толтыру» батырмасын басып, Kaspi чегін жіберіңіз."
         )
         await message.answer(text, parse_mode="HTML")
     else:
         await message.answer("❌ Сіз жүргізуші ретінде тіркелмегенсіз.")
+
+@dp.message(F.text == "💳 Баланс толтыру")
+async def request_topup_receipt(message: types.Message, state: FSMContext):
+    if not is_driver_registered(message.from_user.id):
+        await message.answer("❌ Сіз жүргізуші ретінде тіркелмегенсіз.")
+        return
+
+    await state.set_state(TopupState.waiting_for_receipt)
+    text = (
+        f"💳 <b>Балансты Kaspi арқылы толтыру:</b>\n\n"
+        f"1. Kaspi арқылы мына номерге аударыңыз: <b>+7 70X XXX XX XX</b> (немесе Kaspi Pay)\n"
+        f"2. Төлем жасап болған соң, <b>чектің суретін (скриншот) немесе файлын дәл осы чатқа жіберіңіз</b> 👇"
+    )
+    await message.answer(text, reply_markup=cancel_menu(), parse_mode="HTML")
+
+@dp.message(TopupState.waiting_for_receipt, F.photo | F.document)
+async def process_topup_receipt(message: types.Message, state: FSMContext):
+    driver_id = message.from_user.id
+    conn = sqlite3.connect("joldas_taxi.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT full_name, phone FROM drivers WHERE user_id = ?", (driver_id,))
+    driver = cursor.fetchone()
+    conn.close()
+
+    driver_name = driver[0] if driver else message.from_user.full_name
+    driver_phone = driver[1] if driver else "Нет номера"
+
+    caption = (
+        f"💳 <b>ЖАҢА ТӨЛЕМ ЧЕГІ!</b>\n\n"
+        f"👤 <b>Жүргізуші:</b> {driver_name}\n"
+        f"📞 <b>Тел:</b> {driver_phone}\n"
+        f"🆔 <b>ID:</b> <code>{driver_id}</code>\n\n"
+        f"Толтырылатын сумманы таңдаңыз 👇"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ 500 ₸", callback_data=f"pay_{driver_id}_500"),
+            InlineKeyboardButton(text="➕ 1000 ₸", callback_data=f"pay_{driver_id}_1000")
+        ],
+        [
+            InlineKeyboardButton(text="➕ 2000 ₸", callback_data=f"pay_{driver_id}_2000"),
+            InlineKeyboardButton(text="➕ 5000 ₸", callback_data=f"pay_{driver_id}_5000")
+        ],
+        [
+            InlineKeyboardButton(text="✏️ Басқа сумма", callback_data=f"paycustom_{driver_id}")
+        ]
+    ])
+
+    try:
+        if message.photo:
+            await bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
+        elif message.document:
+            await bot.send_document(chat_id=ADMIN_ID, document=message.document.file_id, caption=caption, reply_markup=kb, parse_mode="HTML")
+        
+        await state.clear()
+        await message.answer("✅ <b>Чек администраторға жіберілді!</b> Балансыңыз жақын арада толтырылады.", reply_markup=main_menu(driver_id), parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки чека админу: {e}")
+        await message.answer("❌ Чекті жіберу кезінде қате шықты. Админге хабарласыңыз.")
+
+# --- ОБРАБОТКА ПОПОЛНЕНИЯ АДМИНОМ ЧЕРЕЗ КНОПКИ ---
+@dp.callback_query(F.data.startswith("pay_"))
+async def admin_quick_pay(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+
+    parts = callback_query.data.split("_")
+    target_id = int(parts[1])
+    amount = float(parts[2])
+
+    conn = sqlite3.connect("joldas_taxi.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+    driver = cursor.fetchone()
+
+    if not driver:
+        await callback_query.answer("❌ Жүргізуші табылмады!", show_alert=True)
+        conn.close()
+        return
+
+    old_balance = driver[0]
+    new_balance = old_balance + amount
+    cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+    conn.commit()
+    conn.close()
+
+    await callback_query.message.edit_caption(
+        caption=callback_query.message.caption + f"\n\n✅ <b>ТОЛТЫРЫЛДЫ: +{amount:.0f} ₸</b>\nБаланс: {new_balance:.0f} ₸",
+        reply_markup=None,
+        parse_mode="HTML"
+    )
+
+    try:
+        notify_text = (
+            f"🎉 <b>Балансыңыз толтырылды!</b>\n\n"
+            f"💰 <b>Бұрынғы баланс:</b> {old_balance:.0f} ₸\n"
+            f"➕ <b>Қосылды:</b> {amount:.0f} ₸\n"
+            f"💵 <b>Ағымдағы баланс:</b> {new_balance:.0f} ₸"
+        )
+        await bot.send_message(chat_id=target_id, text=notify_text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление: {e}")
+
+@dp.callback_query(F.data.startswith("paycustom_"))
+async def admin_custom_pay_start(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+
+    target_id = int(callback_query.data.split("_")[1])
+    await state.update_data(target_driver_id=target_id)
+    await state.set_state(TopupState.waiting_custom_amount)
+    await callback_query.message.answer(f"✍️ ID {target_id} жүргізушіге қанша сумма қосқыңыз келеді? (тек сан жазыңыз, мысалы: 1500)")
+    await callback_query.answer()
+
+@dp.message(TopupState.waiting_custom_amount)
+async def admin_custom_pay_finish(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        amount = float(message.text.strip())
+        data = await state.get_data()
+        target_id = data.get("target_driver_id")
+
+        conn = sqlite3.connect("joldas_taxi.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+        driver = cursor.fetchone()
+
+        if not driver:
+            await message.answer("❌ Жүргізуші табылмады!")
+            conn.close()
+            await state.clear()
+            return
+
+        old_balance = driver[0]
+        new_balance = old_balance + amount
+        cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+        conn.commit()
+        conn.close()
+
+        await state.clear()
+        await message.answer(f"✅ ID {target_id} жүргізушіге {amount:.0f} ₸ толтырылды!\nБұрын: {old_balance:.0f} ₸ ➔ Қазір: {new_balance:.0f} ₸")
+
+        try:
+            notify_text = (
+                f"🎉 <b>Балансыңыз толтырылды!</b>\n\n"
+                f"💰 <b>Бұрынғы баланс:</b> {old_balance:.0f} ₸\n"
+                f"➕ <b>Қосылды:</b> {amount:.0f} ₸\n"
+                f"💵 <b>Ағымдағы баланс:</b> {new_balance:.0f} ₸"
+            )
+            await bot.send_message(chat_id=target_id, text=notify_text, parse_mode="HTML")
+        except Exception as e:
+            logging.error(f"Ошибка уведомления водителю: {e}")
+
+    except ValueError:
+        await message.answer("❌ Тек сан енгізіңіз! Мысалы: 1500")
 
 @dp.message(Command("pay"))
 async def admin_topup_balance(message: types.Message):
@@ -239,20 +399,27 @@ async def admin_topup_balance(message: types.Message):
             conn.close()
             return
 
-        new_balance = driver[0] + amount
+        old_balance = driver[0]
+        new_balance = old_balance + amount
         cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
         conn.commit()
         conn.close()
 
-        await message.answer(f"✅ ID {target_id} жүргізушіге {amount} ₸ толтырылды! Жаңа баланс: {new_balance:.0f} ₸")
+        await message.answer(f"✅ ID {target_id} жүргізушіге {amount:.0f} ₸ толтырылды! Жаңа баланс: {new_balance:.0f} ₸")
         
         try:
-            await bot.send_message(chat_id=target_id, text=f"🎉 <b>Балансыңыз толтырылды!</b>\n➕ Қосылды: {amount} ₸\n💰 Ағымдағы баланс: {new_balance:.0f} ₸", parse_mode="HTML")
+            notify_text = (
+                f"🎉 <b>Балансыңыз толтырылды!</b>\n\n"
+                f"💰 <b>Бұрынғы баланс:</b> {old_balance:.0f} ₸\n"
+                f"➕ <b>Қосылды:</b> {amount:.0f} ₸\n"
+                f"💵 <b>Ағымдағы баланс:</b> {new_balance:.0f} ₸"
+            )
+            await bot.send_message(chat_id=target_id, text=notify_text, parse_mode="HTML")
         except Exception as e:
             logging.error(f"Не удалось отправить уведомление водителю: {e}")
 
     except Exception:
-        await message.answer("❌ Формат қате! Қолдану: `/pay USER_ID SUMMA`\nМысалы: `/pay 123456789 1000`", parse_mode="Markdown")
+        await message.answer("❌ Формат қате! Қолдану: `/pay USER_ID SUMMA`", parse_mode="Markdown")
 
 # --- РЕГИСТРАЦИЯ КЛИЕНТА ---
 @dp.message(ClientRegister.full_name)
@@ -552,7 +719,6 @@ async def accept_order(callback_query: types.CallbackQuery):
     conn = sqlite3.connect("joldas_taxi.db")
     cursor = conn.cursor()
 
-    # Проверка регистрации и баланса водителя
     cursor.execute("SELECT full_name, phone, car_info, balance FROM drivers WHERE user_id = ?", (driver.id,))
     driver_db = cursor.fetchone()
 
@@ -578,7 +744,6 @@ async def accept_order(callback_query: types.CallbackQuery):
         conn.close()
         return
 
-    # Списание комиссии
     new_balance = driver_balance - commission
     cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, driver.id))
 
