@@ -1,8 +1,9 @@
 import os
-import sqlite3
 import logging
 import asyncio
 import re
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -13,28 +14,36 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 
-# Берем настройки из Environment Variables (Render)
+# Настройки из Environment Variables (Render)
 API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) # Telegram ID администратора
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").replace("@", "") # Юзернейм админа без @
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "").replace("@", "")
 
 CITY_GROUP_ID = int(os.getenv("CITY_GROUP_ID", "-1004350443552"))
 INTERCITY_GROUP_ID = int(os.getenv("INTERCITY_GROUP_ID", "-1003756709241"))
 
 COMMISSION_PERCENT = 10 # Процент комиссии от заказа (10%)
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (PostgreSQL) ---
+def get_db_connection():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL переменная окружения не найдена!")
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
 def init_db():
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
     
+    # Таблица заказов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             order_type TEXT,
             delivery_type TEXT,
             item_info TEXT,
@@ -48,30 +57,29 @@ def init_db():
         )
     ''')
     
+    # Таблица водителей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS drivers (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             full_name TEXT,
             phone TEXT,
             car_info TEXT,
-            balance REAL DEFAULT 0.0
+            balance REAL DEFAULT 0.0,
+            has_received_bonus BOOLEAN DEFAULT FALSE
         )
     ''')
 
-    cursor.execute("PRAGMA table_info(drivers)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if 'balance' not in columns:
-        cursor.execute("ALTER TABLE drivers ADD COLUMN balance REAL DEFAULT 0.0")
-
+    # Таблица клиентов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clients (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             full_name TEXT,
             phone TEXT
         )
     ''')
 
     conn.commit()
+    cursor.close()
     conn.close()
 
 init_db()
@@ -139,10 +147,11 @@ def cancel_menu():
 
 def is_driver_registered(user_id: int) -> bool:
     try:
-        conn = sqlite3.connect("joldas_taxi.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM drivers WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT user_id FROM drivers WHERE user_id = %s", (user_id,))
         driver = cursor.fetchone()
+        cursor.close()
         conn.close()
         return driver is not None
     except Exception as e:
@@ -151,10 +160,11 @@ def is_driver_registered(user_id: int) -> bool:
 
 async def is_client_registered(user_id: int) -> bool:
     try:
-        conn = sqlite3.connect("joldas_taxi.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT full_name FROM clients WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT full_name FROM clients WHERE user_id = %s", (user_id,))
         client = cursor.fetchone()
+        cursor.close()
         conn.close()
         return client is not None
     except Exception as e:
@@ -220,10 +230,11 @@ async def support_contact(message: types.Message):
 # --- БАЛАНС И ПОПОЛНЕНИЕ ВОДИТЕЛЯ ---
 @dp.message(F.text == "💰 Менің балансым")
 async def show_driver_balance(message: types.Message):
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT balance FROM drivers WHERE user_id = %s", (message.from_user.id,))
     res = cursor.fetchone()
+    cursor.close()
     conn.close()
 
     if res:
@@ -253,24 +264,32 @@ async def request_topup_receipt(message: types.Message, state: FSMContext):
 @dp.message(TopupState.waiting_for_receipt, F.photo | F.document)
 async def process_topup_receipt(message: types.Message, state: FSMContext):
     driver_id = message.from_user.id
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT full_name, phone FROM drivers WHERE user_id = ?", (driver_id,))
+    cursor.execute("SELECT full_name, phone, has_received_bonus FROM drivers WHERE user_id = %s", (driver_id,))
     driver = cursor.fetchone()
+    cursor.close()
     conn.close()
 
     driver_name = driver[0] if driver else message.from_user.full_name
     driver_phone = driver[1] if driver else "Нет номера"
+    has_bonus = driver[2] if driver else False
+
+    bonus_status = "⚠️ УЖЕ ПОЛУЧАЛ 5000 ₸ БОНУС" if has_bonus else "🎁 ЕЩЕ НЕ ПОЛУЧАЛ БОНУС (МОЖНО ДАТЬ 5000 ₸)"
 
     caption = (
         f"💳 <b>ЖАҢА ТӨЛЕМ ЧЕГІ!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
         f"📞 <b>Тел:</b> {driver_phone}\n"
-        f"🆔 <b>ID:</b> <code>{driver_id}</code>\n\n"
+        f"🆔 <b>ID:</b> <code>{driver_id}</code>\n"
+        f"📌 <b>Статус бонуса:</b> {bonus_status}\n\n"
         f"Толтырылатын сумманы таңдаңыз 👇"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎁 БОНУС 5000 ₸", callback_data=f"paybonus_{driver_id}_5000")
+        ],
         [
             InlineKeyboardButton(text="➕ 500 ₸", callback_data=f"pay_{driver_id}_500"),
             InlineKeyboardButton(text="➕ 1000 ₸", callback_data=f"pay_{driver_id}_1000")
@@ -296,7 +315,58 @@ async def process_topup_receipt(message: types.Message, state: FSMContext):
         logging.error(f"Ошибка отправки чека админу: {e}")
         await message.answer("❌ Чекті жіберу кезінде қате шықты. Админге хабарласыңыз.")
 
-# --- ОБРАБОТКА ПОПОЛНЕНИЯ АДМИНОМ ЧЕРЕЗ КНОПКИ ---
+# --- ОБРАБОТКА ПОПОЛНЕНИЯ И БОНУСА АДМИНОМ ---
+@dp.callback_query(F.data.startswith("paybonus_"))
+async def admin_bonus_pay(callback_query: types.CallbackQuery):
+    if callback_query.from_user.id != ADMIN_ID:
+        return
+
+    parts = callback_query.data.split("_")
+    target_id = int(parts[1])
+    amount = float(parts[2])
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance, has_received_bonus FROM drivers WHERE user_id = %s", (target_id,))
+    driver = cursor.fetchone()
+
+    if not driver:
+        await callback_query.answer("❌ Жүргізуші табылмады!", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    old_balance, has_bonus = driver[0], driver[1]
+
+    if has_bonus:
+        await callback_query.answer("⚠️ Бұл жүргізуші 5000 ₸ бонусты бұрын алып қойған!", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    new_balance = old_balance + amount
+    cursor.execute("UPDATE drivers SET balance = %s, has_received_bonus = TRUE WHERE user_id = %s", (new_balance, target_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await callback_query.message.edit_caption(
+        caption=callback_query.message.caption + f"\n\n🎁 <b>БОНУС 5000 ₸ БЕРІЛДІ!</b>\nБаланс: {new_balance:.0f} ₸",
+        reply_markup=None,
+        parse_mode="HTML"
+    )
+
+    try:
+        notify_text = (
+            f"🎉 <b>Сізге 5000 ₸ ашылу бонусы берілді!</b>\n\n"
+            f"💰 <b>Бұрынғы баланс:</b> {old_balance:.0f} ₸\n"
+            f"🎁 <b>Бонус:</b> {amount:.0f} ₸\n"
+            f"💵 <b>Ағымдағы баланс:</b> {new_balance:.0f} ₸"
+        )
+        await bot.send_message(chat_id=target_id, text=notify_text, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление: {e}")
+
 @dp.callback_query(F.data.startswith("pay_"))
 async def admin_quick_pay(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
@@ -306,20 +376,22 @@ async def admin_quick_pay(callback_query: types.CallbackQuery):
     target_id = int(parts[1])
     amount = float(parts[2])
 
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+    cursor.execute("SELECT balance FROM drivers WHERE user_id = %s", (target_id,))
     driver = cursor.fetchone()
 
     if not driver:
         await callback_query.answer("❌ Жүргізуші табылмады!", show_alert=True)
+        cursor.close()
         conn.close()
         return
 
     old_balance = driver[0]
     new_balance = old_balance + amount
-    cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+    cursor.execute("UPDATE drivers SET balance = %s WHERE user_id = %s", (new_balance, target_id))
     conn.commit()
+    cursor.close()
     conn.close()
 
     await callback_query.message.edit_caption(
@@ -360,21 +432,23 @@ async def admin_custom_pay_finish(message: types.Message, state: FSMContext):
         data = await state.get_data()
         target_id = data.get("target_driver_id")
 
-        conn = sqlite3.connect("joldas_taxi.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+        cursor.execute("SELECT balance FROM drivers WHERE user_id = %s", (target_id,))
         driver = cursor.fetchone()
 
         if not driver:
             await message.answer("❌ Жүргізуші табылмады!")
+            cursor.close()
             conn.close()
             await state.clear()
             return
 
         old_balance = driver[0]
         new_balance = old_balance + amount
-        cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+        cursor.execute("UPDATE drivers SET balance = %s WHERE user_id = %s", (new_balance, target_id))
         conn.commit()
+        cursor.close()
         conn.close()
 
         await state.clear()
@@ -404,20 +478,22 @@ async def admin_topup_balance(message: types.Message):
         target_id = int(args[1])
         amount = float(args[2])
 
-        conn = sqlite3.connect("joldas_taxi.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT balance FROM drivers WHERE user_id = ?", (target_id,))
+        cursor.execute("SELECT balance FROM drivers WHERE user_id = %s", (target_id,))
         driver = cursor.fetchone()
 
         if not driver:
             await message.answer("❌ Жүргізуші табылмады!")
+            cursor.close()
             conn.close()
             return
 
         old_balance = driver[0]
         new_balance = old_balance + amount
-        cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, target_id))
+        cursor.execute("UPDATE drivers SET balance = %s WHERE user_id = %s", (new_balance, target_id))
         conn.commit()
+        cursor.close()
         conn.close()
 
         await message.answer(f"✅ ID {target_id} жүргізушіге {amount:.0f} ₸ толтырылды! Жаңа баланс: {new_balance:.0f} ₸")
@@ -448,11 +524,14 @@ async def process_client_phone(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = message.text
     try:
-        conn = sqlite3.connect("joldas_taxi.db")
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO clients (user_id, full_name, phone) VALUES (?, ?, ?)",
-                       (message.from_user.id, data.get('client_full_name', 'Клиент'), phone))
+        cursor.execute(
+            "INSERT INTO clients (user_id, full_name, phone) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone",
+            (message.from_user.id, data.get('client_full_name', 'Клиент'), phone)
+        )
         conn.commit()
+        cursor.close()
         conn.close()
     except Exception as e:
         logging.error(f"Ошибка сохранения клиента: {e}")
@@ -463,10 +542,11 @@ async def process_client_phone(message: types.Message, state: FSMContext):
 # --- РЕГИСТРАЦИЯ ВОДИТЕЛЯ ---
 @dp.message(F.text == "🚖 Жүргізуші болу")
 async def start_driver_reg(message: types.Message, state: FSMContext):
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM drivers WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT * FROM drivers WHERE user_id = %s", (message.from_user.id,))
     driver = cursor.fetchone()
+    cursor.close()
     conn.close()
 
     if driver:
@@ -501,11 +581,16 @@ async def process_driver_phone(message: types.Message, state: FSMContext):
 @dp.message(DriverRegister.car_info)
 async def process_driver_car(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute('INSERT OR REPLACE INTO drivers (user_id, full_name, phone, car_info, balance) VALUES (?, ?, ?, ?, COALESCE((SELECT balance FROM drivers WHERE user_id = ?), 0.0))',
-                   (message.from_user.id, data['full_name'], data['phone'], message.text, message.from_user.id))
+    cursor.execute('''
+        INSERT INTO drivers (user_id, full_name, phone, car_info, balance) 
+        VALUES (%s, %s, %s, %s, 0.0)
+        ON CONFLICT (user_id) DO UPDATE 
+        SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone, car_info = EXCLUDED.car_info
+    ''', (message.from_user.id, data['full_name'], data['phone'], message.text))
     conn.commit()
+    cursor.close()
     conn.close()
     await state.clear()
 
@@ -524,10 +609,11 @@ async def process_driver_car(message: types.Message, state: FSMContext):
 @dp.chat_join_request()
 async def auto_approve_driver(chat_join_request: ChatJoinRequest):
     user_id = chat_join_request.from_user.id
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM drivers WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT * FROM drivers WHERE user_id = %s", (user_id,))
     driver = cursor.fetchone()
+    cursor.close()
     conn.close()
     if driver:
         await chat_join_request.approve()
@@ -577,16 +663,19 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     dtype = data.get('delivery_type', 'city')
     item_info = data.get('item_info', 'Зат / Посылка')
     
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT phone FROM clients WHERE user_id = %s", (message.from_user.id,))
     client = cursor.fetchone()
     phone = client[0] if client else "Көрсетілмеген"
 
-    cursor.execute("INSERT INTO orders (user_id, order_type, delivery_type, item_info, from_loc, to_loc, price, phone, status) VALUES (?, 'delivery', ?, ?, ?, ?, ?, ?, 'new')",
-                   (message.from_user.id, dtype, item_info, data['from_loc'], data['to_loc'], price, phone))
-    order_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO orders (user_id, order_type, delivery_type, item_info, from_loc, to_loc, price, phone, status) VALUES (%s, 'delivery', %s, %s, %s, %s, %s, %s, 'new') RETURNING id",
+        (message.from_user.id, dtype, item_info, data['from_loc'], data['to_loc'], price, phone)
+    )
+    order_id = cursor.fetchone()[0]
     conn.commit()
+    cursor.close()
     conn.close()
 
     await state.clear()
@@ -636,16 +725,19 @@ async def process_city_price(message: types.Message, state: FSMContext):
     price = message.text
     data = await state.get_data()
     
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT phone FROM clients WHERE user_id = %s", (message.from_user.id,))
     client = cursor.fetchone()
     phone = client[0] if client else "Көрсетілмеген"
 
-    cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, price, phone, status) VALUES (?, 'city', ?, ?, ?, ?, 'new')",
-                   (message.from_user.id, data['from_loc'], data['to_loc'], price, phone))
-    order_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO orders (user_id, order_type, from_loc, to_loc, price, phone, status) VALUES (%s, 'city', %s, %s, %s, %s, 'new') RETURNING id",
+        (message.from_user.id, data['from_loc'], data['to_loc'], price, phone)
+    )
+    order_id = cursor.fetchone()[0]
     conn.commit()
+    cursor.close()
     conn.close()
 
     await state.clear()
@@ -699,16 +791,19 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     price = message.text
     data = await state.get_data()
     
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT phone FROM clients WHERE user_id = ?", (message.from_user.id,))
+    cursor.execute("SELECT phone FROM clients WHERE user_id = %s", (message.from_user.id,))
     client = cursor.fetchone()
     phone = client[0] if client else "Көрсетілмеген"
 
-    cursor.execute("INSERT INTO orders (user_id, order_type, from_loc, to_loc, date_time, seats, price, phone, status) VALUES (?, 'intercity', ?, ?, ?, ?, ?, ?, 'new')",
-                   (message.from_user.id, data['from_loc'], data['to_loc'], data['date_time'], data['seats'], price, phone))
-    order_id = cursor.lastrowid
+    cursor.execute(
+        "INSERT INTO orders (user_id, order_type, from_loc, to_loc, date_time, seats, price, phone, status) VALUES (%s, 'intercity', %s, %s, %s, %s, %s, %s, 'new') RETURNING id",
+        (message.from_user.id, data['from_loc'], data['to_loc'], data['date_time'], data['seats'], price, phone)
+    )
+    order_id = cursor.fetchone()[0]
     conn.commit()
+    cursor.close()
     conn.close()
 
     await state.clear()
@@ -728,25 +823,27 @@ async def process_inter_price(message: types.Message, state: FSMContext):
 # --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
 async def accept_order(callback_query: types.CallbackQuery):
-    order_id = callback_query.data.split('_')[1]
+    order_id = int(callback_query.data.split('_')[1])
     driver = callback_query.from_user
     
-    conn = sqlite3.connect("joldas_taxi.db")
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT full_name, phone, car_info, balance FROM drivers WHERE user_id = ?", (driver.id,))
+    cursor.execute("SELECT full_name, phone, car_info, balance FROM drivers WHERE user_id = %s", (driver.id,))
     driver_db = cursor.fetchone()
 
     if not driver_db:
         await callback_query.answer("❌ Тапсырысты алу үшін алдымен ботта жүргізуші болып тіркеліңіз!", show_alert=True)
+        cursor.close()
         conn.close()
         return
 
-    cursor.execute("SELECT user_id, order_type, delivery_type, item_info, from_loc, to_loc, date_time, seats, price, phone, status FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT user_id, order_type, delivery_type, item_info, from_loc, to_loc, date_time, seats, price, phone, status FROM orders WHERE id = %s", (order_id,))
     order = cursor.fetchone()
 
     if not order or order[10] != 'new':
         await callback_query.answer("Тапсырыс бұрын алынған!", show_alert=True)
+        cursor.close()
         conn.close()
         return
 
@@ -756,18 +853,20 @@ async def accept_order(callback_query: types.CallbackQuery):
 
     if driver_balance < commission:
         await callback_query.answer(f"❌ Балансыңыз жеткіліксіз!\nТапсырыс комиссиясы: {commission:.0f} ₸\nБалансыңыз: {driver_balance:.0f} ₸\nБалансты толтырыңыз.", show_alert=True)
+        cursor.close()
         conn.close()
         return
 
     new_balance = driver_balance - commission
-    cursor.execute("UPDATE drivers SET balance = ? WHERE user_id = ?", (new_balance, driver.id))
+    cursor.execute("UPDATE drivers SET balance = %s WHERE user_id = %s", (new_balance, driver.id))
 
     client_id = order[0]
-    cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = ?", (client_id,))
+    cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = %s", (client_id,))
     client_db = cursor.fetchone()
 
-    cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = ?", (order_id,))
+    cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = %s", (order_id,))
     conn.commit()
+    cursor.close()
     conn.close()
 
     order_type, delivery_type, item_info, from_loc, to_loc, date_time, seats, price, raw_client_phone = order[1], order[2], order[3], order[4], order[5], order[6], order[7], order[8], order[9]
