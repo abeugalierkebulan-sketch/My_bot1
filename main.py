@@ -124,8 +124,6 @@ def validate_phone(raw_phone: str) -> str | None:
         return "7" + digits[1:]
     elif len(digits) == 10 and digits.startswith('7'):
         return "7" + digits
-    elif len(digits) == 10:
-        return "7" + digits
     return None
 
 def clean_phone_number(raw_phone: str) -> str:
