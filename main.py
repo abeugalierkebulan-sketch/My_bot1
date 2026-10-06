@@ -205,6 +205,40 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         await message.answer(text, reply_markup=cancel_menu(), parse_mode="HTML")
 
+# --- СТАТИСТИКА ДЛЯ АДМИНА ---
+@dp.message(Command("stats"))
+async def admin_get_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM clients;")
+        clients_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM drivers;")
+        drivers_count = cursor.fetchone()[0]
+
+        cursor.close()
+        conn.close()
+
+        total = clients_count + drivers_count
+
+        stats_text = (
+            f"📊 <b>СТАТИСТИКА БОТА «ЖОЛДАС ТАКСИ»:</b>\n\n"
+            f"👨‍✈️ <b>Жүргізушілер (Водители):</b> {drivers_count}\n"
+            f"👤 <b>Клиенттер (Пассажиры):</b> {clients_count}\n"
+            f"➖➖➖➖➖➖➖➖➖\n"
+            f"👥 <b>Барлығы (Всего пользователей):</b> {total}"
+        )
+        await message.answer(stats_text, parse_mode="HTML")
+
+    except Exception as e:
+        logging.error(f"Ошибка получения статистики: {e}")
+        await message.answer("❌ Ошибка при получении статистики из базы данных.")
+
 # --- ОТМЕНА ---
 @dp.message(F.text.in_({"❌ Бас тарту", "⬅️ Қайту (артқа)"}))
 async def cancel_order(message: types.Message, state: FSMContext):
