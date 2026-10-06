@@ -62,7 +62,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS drivers (
             user_id BIGINT PRIMARY KEY,
             full_name TEXT,
-            phone TEXT,
+            phone TEXT UNIQUE,
             car_info TEXT,
             balance REAL DEFAULT 0.0,
             has_received_bonus BOOLEAN DEFAULT FALSE
@@ -74,7 +74,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS clients (
             user_id BIGINT PRIMARY KEY,
             full_name TEXT,
-            phone TEXT
+            phone TEXT UNIQUE
         )
     ''')
 
@@ -117,6 +117,25 @@ class TopupState(StatesGroup):
     waiting_for_receipt = State()
     waiting_custom_amount = State()
 
+# --- ВАЛИДАЦИЯ И ОЧИСТКА НОМЕРА ---
+def validate_phone(raw_phone: str) -> str | None:
+    digits = ''.join(filter(str.isdigit, str(raw_phone)))
+    if len(digits) == 11 and digits.startswith(('7', '8')):
+        return "7" + digits[1:]
+    elif len(digits) == 10 and digits.startswith('7'):
+        return "7" + digits
+    return None
+
+def clean_phone_number(raw_phone: str) -> str:
+    phone = validate_phone(raw_phone)
+    return phone if phone else ''.join(filter(str.isdigit, str(raw_phone)))
+
+def parse_price(price_str: str) -> float:
+    digits = re.findall(r'\d+', str(price_str))
+    if digits:
+        return float(''.join(digits))
+    return 0.0
+
 # --- МЕНЮ ---
 def main_menu(user_id: int = None):
     keyboard = [
@@ -145,6 +164,15 @@ def cancel_menu():
         resize_keyboard=True
     )
 
+def phone_request_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Номерді жіберу", request_contact=True)],
+            [KeyboardButton(text="❌ Бас тарту")]
+        ],
+        resize_keyboard=True
+    )
+
 def is_driver_registered(user_id: int) -> bool:
     try:
         conn = get_db_connection()
@@ -170,20 +198,6 @@ async def is_client_registered(user_id: int) -> bool:
     except Exception as e:
         logging.error(f"Ошибка проверки клиента: {e}")
         return False
-
-def clean_phone_number(raw_phone: str) -> str:
-    digits = ''.join(filter(str.isdigit, str(raw_phone)))
-    if len(digits) == 10:
-        return "7" + digits
-    elif len(digits) == 11 and digits.startswith("8"):
-        return "7" + digits[1:]
-    return digits
-
-def parse_price(price_str: str) -> float:
-    digits = re.findall(r'\d+', str(price_str))
-    if digits:
-        return float(''.join(digits))
-    return 0.0
 
 # --- СТАРТ ---
 @dp.message(Command("start"))
@@ -551,24 +565,42 @@ async def admin_topup_balance(message: types.Message):
 async def process_client_name(message: types.Message, state: FSMContext):
     await state.update_data(client_full_name=message.text)
     await state.set_state(ClientRegister.phone)
-    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=cancel_menu())
+    await message.answer(
+        "📱 <b>Байланыс телефоныңызды енгізіңіз:</b>\n\n"
+        "Төмендегі «📱 Номерді жіберу» батырмасын басыңыз немесе қолдан жазыңыз (мысалы: 87071234567):",
+        reply_markup=phone_request_menu(),
+        parse_mode="HTML"
+    )
 
-@dp.message(ClientRegister.phone)
+@dp.message(ClientRegister.phone, F.contact | F.text)
 async def process_client_phone(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    phone = message.text
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO clients (user_id, full_name, phone) VALUES (%s, %s, %s) ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone",
-            (message.from_user.id, data.get('client_full_name', 'Клиент'), phone)
-        )
-        conn.commit()
+    raw_phone = message.contact.phone_number if message.contact else message.text
+    phone = validate_phone(raw_phone)
+
+    # 1. Валидация формата
+    if not phone:
+        await message.answer("❌ <b>Қате нөмір!</b> Телефон нөмірін дұрыс енгізіңіз (мысалы: 87071234567):")
+        return
+
+    # 2. Проверка дубликата в базе
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM clients WHERE phone = %s AND user_id != %s", (phone, message.from_user.id))
+    if cursor.fetchone():
         cursor.close()
         conn.close()
-    except Exception as e:
-        logging.error(f"Ошибка сохранения клиента: {e}")
+        await message.answer("⚠️ <b>Бұл нөмір жүйеде тіркеліп қойған!</b> Басқа нөмір енгізіңіз:")
+        return
+
+    data = await state.get_data()
+    cursor.execute(
+        "INSERT INTO clients (user_id, full_name, phone) VALUES (%s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone",
+        (message.from_user.id, data.get('client_full_name', 'Клиент'), phone)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
 
     await state.clear()
     await message.answer("✅ <b>Сіз сәтті тіркелдіңіз!</b>\n\nЕнді керекті бөлімді таңдай аласыз 👇", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
@@ -604,11 +636,36 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
 async def process_driver_name(message: types.Message, state: FSMContext):
     await state.update_data(full_name=message.text)
     await state.set_state(DriverRegister.phone)
-    await message.answer("📱 Байланыс телефоныңызды енгізіңіз (мысалы: 87071234567):", reply_markup=cancel_menu())
+    await message.answer(
+        "📱 <b>Байланыс телефоныңызды енгізіңіз:</b>\n\n"
+        "Төмендегі «📱 Номерді жіберу» батырмасын басыңыз немесе қолдан жазыңыз (мысалы: 87071234567):",
+        reply_markup=phone_request_menu(),
+        parse_mode="HTML"
+    )
 
-@dp.message(DriverRegister.phone)
+@dp.message(DriverRegister.phone, F.contact | F.text)
 async def process_driver_phone(message: types.Message, state: FSMContext):
-    await state.update_data(phone=message.text)
+    raw_phone = message.contact.phone_number if message.contact else message.text
+    phone = validate_phone(raw_phone)
+
+    # 1. Валидация формата
+    if not phone:
+        await message.answer("❌ <b>Қате нөмір!</b> Телефон нөмірін дұрыс енгізіңіз (мысалы: 87071234567):")
+        return
+
+    # 2. Проверка дубликата в базе
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM drivers WHERE phone = %s AND user_id != %s", (phone, message.from_user.id))
+    if cursor.fetchone():
+        cursor.close()
+        conn.close()
+        await message.answer("⚠️ <b>Бұл нөмір басқа жүргізушіде тіркеліп қойған!</b> Басқа нөмір енгізіңіз:")
+        return
+    cursor.close()
+    conn.close()
+
+    await state.update_data(phone=phone)
     await state.set_state(DriverRegister.car_info)
     await message.answer("🚘 Көлігіңіздің маркасы мен мемлекеттік нөмірін жазыңыз:", reply_markup=cancel_menu())
 
