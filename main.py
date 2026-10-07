@@ -816,7 +816,33 @@ async def start_city_order(message: types.Message, state: FSMContext):
 async def process_city_from(message: types.Message, state: FSMContext):
     await state.update_data(from_loc=message.text)
     await state.set_state(OrderCity.to_loc)
-    await message.answer("🏁 <b>Қайда барамыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+
+    user_id = message.from_user.id
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT title, address FROM user_addresses WHERE user_id = %s", (user_id,))
+    saved_addresses = cursor.fetchall()
+    cursor.close()
+    conn.close()
+
+    inline_keyboard = []
+    for title, address in saved_addresses:
+        inline_keyboard.append([
+            InlineKeyboardButton(text=f"{title} ({address})", callback_data=f"set_dest_{address}")
+        ])
+    
+    inline_keyboard.append([
+        InlineKeyboardButton(text="⚙️ Мекенжайларды баптау", callback_data="manage_addresses")
+    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+    await message.answer(
+        "🏁 <b>Қайда барамыз?</b>\n\nТөмендегі дайын мекенжайды таңдаңыз немесе қолдан жазыңыз:",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
 
 @dp.message(OrderCity.to_loc)
 async def process_city_to(message: types.Message, state: FSMContext):
