@@ -1,16 +1,12 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
-
-# Импортируем твои существующие функции из main.py
-# (убедись, что get_db_connection, cancel_menu, main_menu и состояния OrderCity определены в main.py или config.py)
-from main import get_db_connection, cancel_menu, main_menu, OrderCity
-
-router = Router()
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 class AddressSetup(StatesGroup):
     waiting_for_address = State()
+
+router = Router()
 
 def get_address_settings_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -21,8 +17,10 @@ def get_address_settings_kb():
     ])
 
 # 1. Выбор сохраненного адреса
-@router.callback_query(F.data.startswith("set_dest_"), OrderCity.to_loc)
+@router.callback_query(F.data.startswith("set_dest_"))
 async def process_quick_destination(callback_query: types.CallbackQuery, state: FSMContext):
+    from main import OrderCity
+    
     target_address = callback_query.data.replace("set_dest_", "")
     await state.update_data(to_loc=target_address)
     await state.set_state(OrderCity.price)
@@ -33,7 +31,7 @@ async def process_quick_destination(callback_query: types.CallbackQuery, state: 
         parse_mode="HTML"
     )
 
-# 2. Нажатие на "Настроить адреса"
+# 2. Нажатие на "⚙️ Мекенжайларды баптау"
 @router.callback_query(F.data == "manage_addresses")
 async def process_manage_addresses(callback_query: types.CallbackQuery):
     await callback_query.answer()
@@ -43,9 +41,11 @@ async def process_manage_addresses(callback_query: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-# 3. Выбор категории (например, 🏡 Үйге)
+# 3. Выбор категории (например: 🏡 Үйге)
 @router.callback_query(F.data.startswith("add_addr_"))
 async def start_add_address(callback_query: types.CallbackQuery, state: FSMContext):
+    from main import cancel_menu
+    
     title = callback_query.data.replace("add_addr_", "")
     await state.update_data(target_title=title)
     await state.set_state(AddressSetup.waiting_for_address)
@@ -60,6 +60,8 @@ async def start_add_address(callback_query: types.CallbackQuery, state: FSMConte
 # 4. Сохранение введенного адреса в БД
 @router.message(AddressSetup.waiting_for_address)
 async def save_user_address(message: types.Message, state: FSMContext):
+    from main import get_db_connection, main_menu
+    
     data = await state.get_data()
     title = data.get("target_title", "Мекенжай")
     address_text = message.text.strip()
