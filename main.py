@@ -77,6 +77,17 @@ def init_db():
             phone TEXT UNIQUE
         )
     ''')
+    
+    # Таблица любимых адресов
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_addresses (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            title TEXT,
+            address TEXT,
+            UNIQUE(user_id, title)
+        )
+    ''')
 
     conn.commit()
     cursor.close()
