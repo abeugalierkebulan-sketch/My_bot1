@@ -1,6 +1,6 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.state import State, StatesGroup, any_state
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 class AddressSetup(StatesGroup):
@@ -16,7 +16,7 @@ def get_address_settings_kb():
         [InlineKeyboardButton(text="🧸 Балабақшаға (Садик)", callback_data="add_addr_🧸 Балабақшаға")]
     ])
 
-# 1. Выбор сохраненного адреса
+# 1. Выбор сохраненного адреса (работает из состояния OrderCity.to_loc)
 @router.callback_query(F.data.startswith("set_dest_"))
 async def process_quick_destination(callback_query: types.CallbackQuery, state: FSMContext):
     from main import OrderCity
@@ -31,8 +31,8 @@ async def process_quick_destination(callback_query: types.CallbackQuery, state: 
         parse_mode="HTML"
     )
 
-# 2. Нажатие на "⚙️ Мекенжайларды баптау"
-@router.callback_query(F.data == "manage_addresses")
+# 2. Нажатие на "⚙️ Мекенжайларды баптау" (работает в любом состоянии)
+@router.callback_query(F.data == "manage_addresses", any_state)
 async def process_manage_addresses(callback_query: types.CallbackQuery):
     await callback_query.answer()
     await callback_query.message.answer(
@@ -41,8 +41,8 @@ async def process_manage_addresses(callback_query: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-# 3. Выбор категории (например: 🏡 Үйге)
-@router.callback_query(F.data.startswith("add_addr_"))
+# 3. Выбор категории (работает в любом состоянии)
+@router.callback_query(F.data.startswith("add_addr_"), any_state)
 async def start_add_address(callback_query: types.CallbackQuery, state: FSMContext):
     from main import cancel_menu
     
