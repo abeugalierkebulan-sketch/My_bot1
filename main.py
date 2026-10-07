@@ -11,6 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ChatJoinRequest
 from aiohttp import web
+from favorite_addresses import router as favorite_addresses_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -28,6 +29,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+dp.include_router(favorite_addresses_router)
 
 # --- БАЗА ДАННЫХ (PostgreSQL) ---
 def get_db_connection():
