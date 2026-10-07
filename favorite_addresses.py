@@ -17,7 +17,7 @@ def get_address_settings_kb():
     ])
 
 # 1. Выбор сохраненного адреса
-@router.callback_query(F.data.startswith("set_dest_"))
+@router.callback_query(F.data.startswith("set_dest_"), StateFilter("*"))
 async def process_quick_destination(callback_query: types.CallbackQuery, state: FSMContext):
     from main import OrderCity
     
@@ -31,7 +31,7 @@ async def process_quick_destination(callback_query: types.CallbackQuery, state: 
         parse_mode="HTML"
     )
 
-# 2. Нажатие на "⚙️ Мекенжайларды баптау" (без ограничения по состоянию)
+# 2. Нажатие на "⚙️ Мекенжайларды баптау"
 @router.callback_query(F.data == "manage_addresses", StateFilter("*"))
 async def process_manage_addresses(callback_query: types.CallbackQuery):
     await callback_query.answer()
@@ -41,7 +41,7 @@ async def process_manage_addresses(callback_query: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-# 3. Выбор конкретной категории (без ограничения по состоянию)
+# 3. Выбор конкретной категории
 @router.callback_query(F.data.startswith("add_addr_"), StateFilter("*"))
 async def start_add_address(callback_query: types.CallbackQuery, state: FSMContext):
     from main import cancel_menu
