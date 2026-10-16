@@ -788,12 +788,6 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
 
     await state.clear()
     
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
-    ])
-    await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
-    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
-
     if dtype == "city":
         type_title = "ҚАЛА ІШІНДЕ"
         target_group_id = CITY_GROUP_ID
@@ -817,6 +811,12 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     conn.commit()
     cursor.close()
     conn.close()
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
+    await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
 # --- ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
@@ -862,12 +862,6 @@ async def process_city_price(message: types.Message, state: FSMContext):
 
     await state.clear()
     
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
-    ])
-    await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
-    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
-
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n"
         f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
@@ -883,6 +877,12 @@ async def process_city_price(message: types.Message, state: FSMContext):
     conn.commit()
     cursor.close()
     conn.close()
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
+    await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
 # --- ЗАКАЗ МЕЖГОРОД ---
 @dp.message(F.text == "🛣 Қалааралық (Межгород)")
@@ -940,12 +940,6 @@ async def process_inter_price(message: types.Message, state: FSMContext):
 
     await state.clear()
     
-    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
-    ])
-    await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
-    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
-
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛААРАЛЫҚ №{order_id}</b>\n\n"
         f"📍 <b>Қайдан:</b> {data['from_loc']}\n"
@@ -964,65 +958,76 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     cursor.close()
     conn.close()
 
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
+    await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
+
 # --- ОТМЕНА ЗАКАЗА КЛИЕНТОМ ---
 @dp.callback_query(F.data.startswith("cancelorder_"))
 async def client_cancel_order(callback_query: types.CallbackQuery):
-    order_id = int(callback_query.data.split('_')[1])
-    user_id = callback_query.from_user.id
+    try:
+        order_id = int(callback_query.data.split('_')[1])
+        user_id = callback_query.from_user.id
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, status, order_type, delivery_type, group_msg_id FROM orders WHERE id = %s", (order_id,))
-    order = cursor.fetchone()
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, status, order_type, delivery_type, group_msg_id FROM orders WHERE id = %s", (order_id,))
+        order = cursor.fetchone()
 
-    if not order:
-        await callback_query.answer("❌ Тапсырыс табылмады!", show_alert=True)
+        if not order:
+            await callback_query.answer("❌ Тапсырыс табылмады!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        client_id, status, order_type, delivery_type, group_msg_id = order[0], order[1], order[2], order[3], order[4]
+
+        if client_id != user_id:
+            await callback_query.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        if status == 'cancelled':
+            await callback_query.answer("⚠️ Тапсырыс бұрын жойылған.", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        if status == 'accepted':
+            await callback_query.answer("⚠️ Жүргізуші бұл тапсырысты қабылдап қойған, отмена жасау мүмкін емес!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        # Меняем статус на cancelled
+        cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
+        conn.commit()
         cursor.close()
         conn.close()
-        return
 
-    client_id, status, order_type, delivery_type, group_msg_id = order[0], order[1], order[2], order[3], order[4]
+        await callback_query.message.edit_text(f"❌ <b>№{order_id} тапсырысыңыз жойылды.</b>", parse_mode="HTML")
+        await callback_query.answer("Тапсырыс сәтті жойылды!")
 
-    if client_id != user_id:
-        await callback_query.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
-        cursor.close()
-        conn.close()
-        return
+        # Удаляем карточку из группы
+        if group_msg_id:
+            if order_type == 'delivery':
+                group_id = CITY_GROUP_ID if delivery_type == 'city' else INTERCITY_GROUP_ID
+            elif order_type == 'city':
+                group_id = CITY_GROUP_ID
+            else:
+                group_id = INTERCITY_GROUP_ID
 
-    if status == 'cancelled':
-        await callback_query.answer("⚠️ Тапсырыс бұрын жойылған.", show_alert=True)
-        cursor.close()
-        conn.close()
-        return
+            try:
+                await bot.delete_message(chat_id=group_id, message_id=group_msg_id)
+            except Exception as e:
+                logging.error(f"Не удалось удалить карточку заказа из группы: {e}")
 
-    if status == 'accepted':
-        await callback_query.answer("⚠️ Жүргізуші бұл тапсырысты қабылдап қойған, отмена жасау мүмкін емес!", show_alert=True)
-        cursor.close()
-        conn.close()
-        return
-
-    # Меняем статус на cancelled
-    cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-    await callback_query.message.edit_text(f"❌ <b>№{order_id} тапсырысыңыз жойылды (отменен).</b>", parse_mode="HTML")
-    await callback_query.answer("Тапсырыс сәтті жойылды!")
-
-    # Удаляем карточку из группы
-    if group_msg_id:
-        if order_type == 'delivery':
-            group_id = CITY_GROUP_ID if delivery_type == 'city' else INTERCITY_GROUP_ID
-        elif order_type == 'city':
-            group_id = CITY_GROUP_ID
-        else:
-            group_id = INTERCITY_GROUP_ID
-
-        try:
-            await bot.delete_message(chat_id=group_id, message_id=group_msg_id)
-        except Exception as e:
-            logging.error(f"Не удалось удалить карточку заказа из группы: {e}")
+    except Exception as e:
+        logging.error(f"Ошибка при отмене заказа клиентом: {e}")
+        await callback_query.answer("❌ Қате орын алды.", show_alert=True)
 
 # --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
