@@ -803,14 +803,18 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жеткізу ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    sent_msg = await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        sent_msg = await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка отправки карточки в группу доставки: {e}")
 
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
@@ -869,14 +873,18 @@ async def process_city_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    sent_msg = await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        sent_msg = await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка отправки карточки в городскую группу: {e}")
 
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
@@ -949,14 +957,18 @@ async def process_inter_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    sent_msg = await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
     
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
-    conn.commit()
-    cursor.close()
-    conn.close()
+    try:
+        sent_msg = await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Ошибка отправки карточки в междугородную группу: {e}")
 
     cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
