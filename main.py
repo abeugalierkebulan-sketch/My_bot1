@@ -53,7 +53,8 @@ def init_db():
             seats TEXT,
             price TEXT,
             phone TEXT,
-            status TEXT
+            status TEXT,
+            group_msg_id BIGINT
         )
     ''')
     
@@ -693,14 +694,12 @@ async def process_driver_car(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
         ])
         
-        # Сначала отправляем сообщение с главным меню вместо кнопки отмены
         await message.answer(
             "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\n"
             "⚠️ <b>Заказ қабылдау үшін міндетті түрде төмендегі топтарға қосылыңыз:</b>",
             reply_markup=main_menu(message.from_user.id),
             parse_mode="HTML"
         )
-        # Затем отправляем инлайн-кнопки для вступления в группы
         await message.answer(
             "👇 Төмендегі сілтемелер арқылы топтарға кіріңіз:",
             reply_markup=group_kb,
@@ -788,7 +787,12 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
+    
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
     await message.answer("✅ <b>Жеткізу тапсырысы қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
     if dtype == "city":
         type_title = "ҚАЛА ІШІНДЕ"
@@ -805,7 +809,14 @@ async def process_delivery_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жеткізу ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
+    sent_msg = await bot.send_message(chat_id=target_group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # --- ЗАКАЗ ПО ГОРОДУ ---
 @dp.message(F.text == "🏙 Қала ішінде")
@@ -850,7 +861,12 @@ async def process_city_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
+    
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
     await message.answer("✅ <b>Тапсырысыңыз қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛА ІШІНДЕ №{order_id}</b>\n\n"
@@ -859,7 +875,14 @@ async def process_city_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+    sent_msg = await bot.send_message(chat_id=CITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
 
 # --- ЗАКАЗ МЕЖГОРОД ---
 @dp.message(F.text == "🛣 Қалааралық (Межгород)")
@@ -916,7 +939,12 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     conn.close()
 
     await state.clear()
+    
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырыстан бас тарту", callback_data=f"cancelorder_{order_id}")]
+    ])
     await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+    await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
     card_text = (
         f"🚨 <b>ЖОЛДАС ТАКСИ: ҚАЛААРАЛЫҚ №{order_id}</b>\n\n"
@@ -927,7 +955,74 @@ async def process_inter_price(message: types.Message, state: FSMContext):
         f"💰 <b>Жол ақысы:</b> {price}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]])
-    await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+    sent_msg = await bot.send_message(chat_id=INTERCITY_GROUP_ID, text=card_text, reply_markup=kb, parse_mode="HTML")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE orders SET group_msg_id = %s WHERE id = %s", (sent_msg.message_id, order_id))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# --- ОТМЕНА ЗАКАЗА КЛИЕНТОМ ---
+@dp.callback_query(F.data.startswith("cancelorder_"))
+async def client_cancel_order(callback_query: types.CallbackQuery):
+    order_id = int(callback_query.data.split('_')[1])
+    user_id = callback_query.from_user.id
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, status, order_type, delivery_type, group_msg_id FROM orders WHERE id = %s", (order_id,))
+    order = cursor.fetchone()
+
+    if not order:
+        await callback_query.answer("❌ Тапсырыс табылмады!", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    client_id, status, order_type, delivery_type, group_msg_id = order[0], order[1], order[2], order[3], order[4]
+
+    if client_id != user_id:
+        await callback_query.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    if status == 'cancelled':
+        await callback_query.answer("⚠️ Тапсырыс бұрын жойылған.", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    if status == 'accepted':
+        await callback_query.answer("⚠️ Жүргізуші бұл тапсырысты қабылдап қойған, отмена жасау мүмкін емес!", show_alert=True)
+        cursor.close()
+        conn.close()
+        return
+
+    # Меняем статус на cancelled
+    cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    await callback_query.message.edit_text(f"❌ <b>№{order_id} тапсырысыңыз жойылды (отменен).</b>", parse_mode="HTML")
+    await callback_query.answer("Тапсырыс сәтті жойылды!")
+
+    # Удаляем карточку из группы
+    if group_msg_id:
+        if order_type == 'delivery':
+            group_id = CITY_GROUP_ID if delivery_type == 'city' else INTERCITY_GROUP_ID
+        elif order_type == 'city':
+            group_id = CITY_GROUP_ID
+        else:
+            group_id = INTERCITY_GROUP_ID
+
+        try:
+            await bot.delete_message(chat_id=group_id, message_id=group_msg_id)
+        except Exception as e:
+            logging.error(f"Не удалось удалить карточку заказа из группы: {e}")
 
 # --- ПРИНЯТИЕ ЗАКАЗА ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
@@ -951,7 +1046,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     order = cursor.fetchone()
 
     if not order or order[10] != 'new':
-        await callback_query.answer("Тапсырыс бұрын алынған!", show_alert=True)
+        await callback_query.answer("Тапсырыс бұрын алынған немесе жойылған!", show_alert=True)
         cursor.close()
         conn.close()
         return
