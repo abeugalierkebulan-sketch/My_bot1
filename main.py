@@ -623,10 +623,10 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
                 [InlineKeyboardButton(text="🏙 Қала ішіндегі топқа қосылу", url=city_link)],
                 [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
             ])
-            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Топтарға өту үшін төмендегі сілтемелерді басыңыз:", reply_markup=kb, parse_mode="HTML")
+            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Заказ қабылдау үшін міндетті түрде төмендегі топтарға қосылыңыз:", reply_markup=kb, parse_mode="HTML")
         except Exception as e:
             logging.error(f"Ошибка получения ссылок: {e}")
-            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Жұмыс топтарына қосылыңыз.", parse_mode="HTML")
+            await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Заказ қабылдау үшін топтарға қосылыңыз.", parse_mode="HTML")
         return
 
     await state.set_state(DriverRegister.full_name)
@@ -692,10 +692,28 @@ async def process_driver_car(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="🏙 Қала ішіндегі топқа қосылу", url=city_link)],
             [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)]
         ])
-        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\nТоптарға қосылыңыз 👇", reply_markup=group_kb, parse_mode="HTML")
+        
+        # Сначала отправляем сообщение с главным меню вместо кнопки отмены
+        await message.answer(
+            "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\n"
+            "⚠️ <b>Заказ қабылдау үшін міндетті түрде төмендегі топтарға қосылыңыз:</b>",
+            reply_markup=main_menu(message.from_user.id),
+            parse_mode="HTML"
+        )
+        # Затем отправляем инлайн-кнопки для вступления в группы
+        await message.answer(
+            "👇 Төмендегі сілтемелер арқылы топтарға кіріңіз:",
+            reply_markup=group_kb,
+            parse_mode="HTML"
+        )
     except Exception as e:
         logging.error(f"Ошибка сгенерировать ссылки: {e}")
-        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
+        await message.answer(
+            "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\n"
+            "⚠️ <b>Заказ қабылдау үшін міндетті түрде топтарға қосылыңыз!</b>",
+            reply_markup=main_menu(message.from_user.id),
+            parse_mode="HTML"
+        )
 
 @dp.chat_join_request()
 async def auto_approve_driver(chat_join_request: ChatJoinRequest):
