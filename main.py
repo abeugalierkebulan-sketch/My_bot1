@@ -1020,7 +1020,11 @@ async def client_cancel_order(callback_query: types.CallbackQuery):
         cursor.close()
         conn.close()
 
-        await callback_query.message.edit_text(f"❌ <b>№{order_id} тапсырысыңыз жойылды.</b>", parse_mode="HTML")
+        try:
+            await callback_query.message.edit_text(f"❌ <b>№{order_id} тапсырысыңыз жойылды.</b>", parse_mode="HTML")
+        except Exception:
+            await callback_query.message.answer(f"❌ <b>№{order_id} тапсырысыңыз жойылды.</b>", parse_mode="HTML")
+            
         await callback_query.answer("Тапсырыс сәтті жойылды!")
 
         # Удаляем карточку из группы
@@ -1154,7 +1158,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     except Exception as e:
         logging.error(f"Ошибка отправки водителю: {e}")
 
-    # 3. КАРТОЧКА КЛИЕНТУ В ЛС
+    # 3. КАРТОЧКА КЛИЕНТУ В ЛС (С кнопкой отмены поездки и связью с водителем)
     client_msg = (
         f"🚖 <b>№{order_id} тапсырысыңызды жүргізуші қабылдады!</b>\n\n"
         f"👤 <b>Жүргізуші:</b> {driver_name}\n"
@@ -1162,10 +1166,64 @@ async def accept_order(callback_query: types.CallbackQuery):
         f"🚘 <b>Көлігі:</b> {driver_car}\n\n"
         f"Жүргізуші сізбен жақында хабарласады."
     )
+    
+    client_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_driver_phone}")],
+        [InlineKeyboardButton(text="❌ Сапардан бас тарту", callback_data=f"canceltrip_{order_id}")]
+    ])
+
     try:
-        await bot.send_message(chat_id=client_id, text=client_msg, parse_mode="HTML")
+        await bot.send_message(chat_id=client_id, text=client_msg, reply_markup=client_kb, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка отправки клиенту: {e}")
+
+# --- ОТМЕНА ПОЕЗДКИ КЛИЕНТОМ ПОСЛЕ ПРИНЯТИЯ ВОДИТЕЛЕМ ---
+@dp.callback_query(F.data.startswith("canceltrip_"))
+async def client_cancel_trip(callback_query: types.CallbackQuery):
+    try:
+        order_id = int(callback_query.data.split('_')[1])
+        user_id = callback_query.from_user.id
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, status FROM orders WHERE id = %s", (order_id,))
+        order = cursor.fetchone()
+
+        if not order:
+            await callback_query.answer("❌ Тапсырыс табылмады!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        client_id, status = order[0], order[1]
+
+        if client_id != user_id:
+            await callback_query.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        if status == 'cancelled':
+            await callback_query.answer("⚠️ Сапар бұрын жойылған.", show_alert=True)
+            cursor.close()
+            conn.close()
+            return
+
+        cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        try:
+            await callback_query.message.edit_text(f"❌ <b>№{order_id} сапарыңыз бас тартылды (отменено).</b>", parse_mode="HTML")
+        except Exception:
+            await callback_query.message.answer(f"❌ <b>№{order_id} сапарыңыз бас тартылды.</b>", parse_mode="HTML")
+
+        await callback_query.answer("Сапар сәтті бас тартылды!")
+
+    except Exception as e:
+        logging.error(f"Ошибка при отмене поездки клиентом: {e}")
+        await callback_query.answer("❌ Қате орын алды.", show_alert=True)
 
 # --- ВЕБ-СЕРВЕР ---
 async def handle_ping(request):
