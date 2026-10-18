@@ -39,11 +39,14 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL переменная окружения не найдена!")
 
-COMMISSION_PERCENT = 10      # Процент комиссии от заказа
+COMMISSION_PERCENT = 10           # Комиссия: город и доставка по городу
+INTERCITY_COMMISSION_PERCENT = 5  # Комиссия: межгород и доставка между городами
+MAX_SAVED_ADDRESSES = 10          # Сколько адресов клиент может сохранить
 BONUS_AMOUNT = 5000          # Бонус новому водителю
 MIN_PRICE = 100              # Минимальная цена заказа (защита от "договорная", "0" и т.п.)
 MAX_ADMIN_AMOUNT = 1_000_000 # Максимум для ручного пополнения
 ORDER_TIMEOUT_MINUTES = 15   # Через сколько минут непринятый заказ закрывается автоматически
+REMINDER_DELAYS_HOURS = (1, 24)  # Напоминания водителю о вступлении в группы: через 1 час и через 24 часа после регистрации
 REFUND_ON_CANCEL = False     # Комиссия водителю НЕ возвращается, если клиент отменил УЖЕ принятый заказ
 KASPI_INFO = os.getenv("KASPI_INFO", "+7 775 699 63 09 (Еркебұлан Ә.)")
 
@@ -147,6 +150,19 @@ def _init_db():
                 has_received_bonus BOOLEAN DEFAULT FALSE
             )
         ''')
+        cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS join_msg_id BIGINT")
+        cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ DEFAULT NOW()")
+        cur.execute("ALTER TABLE drivers ADD COLUMN IF NOT EXISTS reminders_sent INT DEFAULT 0")
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS saved_addresses (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                label TEXT NOT NULL,
+                address TEXT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        ''')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_saved_addresses_user ON saved_addresses (user_id)")
         cur.execute('''
             CREATE TABLE IF NOT EXISTS clients (
                 user_id BIGINT PRIMARY KEY,
@@ -175,6 +191,69 @@ def _get_driver(user_id):
             (user_id,),
         )
         return cur.fetchone()
+
+
+def _set_join_msg(user_id, msg_id):
+    with db_cursor() as cur:
+        cur.execute("UPDATE drivers SET join_msg_id = %s WHERE user_id = %s", (msg_id, user_id))
+
+
+def _get_join_msg(user_id):
+    with db_cursor() as cur:
+        cur.execute("SELECT join_msg_id FROM drivers WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def _get_reminder_candidates(limit=50):
+    """Водители, которым пора отправить очередное напоминание (по расписанию REMINDER_DELAYS_HOURS)."""
+    conds, params = [], []
+    for i, hours in enumerate(REMINDER_DELAYS_HOURS):
+        conds.append("(COALESCE(reminders_sent, 0) = %s AND registered_at < NOW() - (%s * INTERVAL '1 hour'))")
+        params += [i, hours]
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT user_id, COALESCE(reminders_sent, 0), join_msg_id FROM drivers WHERE "
+            + " OR ".join(conds) + " ORDER BY registered_at LIMIT %s",
+            (*params, limit),
+        )
+        return cur.fetchall()
+
+
+def _set_reminders_sent(user_id, count):
+    with db_cursor() as cur:
+        cur.execute("UPDATE drivers SET reminders_sent = %s WHERE user_id = %s", (count, user_id))
+
+
+def _get_addresses(user_id):
+    with db_cursor() as cur:
+        cur.execute("SELECT id, label, address FROM saved_addresses WHERE user_id = %s ORDER BY id", (user_id,))
+        return cur.fetchall()
+
+
+def _get_address(address_id, user_id):
+    with db_cursor() as cur:
+        cur.execute("SELECT address FROM saved_addresses WHERE id = %s AND user_id = %s", (address_id, user_id))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def _add_address(user_id, label, address):
+    """Возвращает id или None, если достигнут лимит."""
+    with db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM saved_addresses WHERE user_id = %s", (user_id,))
+        if cur.fetchone()[0] >= MAX_SAVED_ADDRESSES:
+            return None
+        cur.execute(
+            "INSERT INTO saved_addresses (user_id, label, address) VALUES (%s, %s, %s) RETURNING id",
+            (user_id, label, address),
+        )
+        return cur.fetchone()[0]
+
+
+def _delete_address(address_id, user_id):
+    with db_cursor() as cur:
+        cur.execute("DELETE FROM saved_addresses WHERE id = %s AND user_id = %s", (address_id, user_id))
 
 
 def _get_stats():
@@ -372,7 +451,7 @@ def _accept_order(order_id, driver_id):
                     return {"status": o[1]}
                 return {"status": "taken"}
 
-            commission = round(parse_price(order[8]) * COMMISSION_PERCENT / 100)
+            commission = round(parse_price(order[8]) * commission_percent(order[1], order[2]) / 100)
             cur.execute(
                 "UPDATE drivers SET balance = balance - %s WHERE user_id = %s AND balance >= %s RETURNING balance",
                 (commission, driver_id, commission),
@@ -442,6 +521,11 @@ class BroadcastState(StatesGroup):
     waiting_message = State()
 
 
+class AddressState(StatesGroup):
+    label = State()
+    address = State()
+
+
 # ======================= ВАЛИДАЦИЯ =======================
 def validate_phone(raw_phone: str) -> str | None:
     digits = ''.join(filter(str.isdigit, str(raw_phone)))
@@ -455,6 +539,12 @@ def validate_phone(raw_phone: str) -> str | None:
 def clean_phone_number(raw_phone: str) -> str:
     phone = validate_phone(raw_phone)
     return phone if phone else ''.join(filter(str.isdigit, str(raw_phone)))
+
+
+def commission_percent(order_type, delivery_type=None) -> int:
+    if order_type == 'intercity' or (order_type == 'delivery' and delivery_type == 'intercity'):
+        return INTERCITY_COMMISSION_PERCENT
+    return COMMISSION_PERCENT
 
 
 _PRICE_RE = re.compile(r'\d{1,3}(?:[ \u00a0]\d{3})+|\d+')
@@ -494,6 +584,7 @@ async def main_menu(user_id: int = None):
     keyboard = [
         [KeyboardButton(text="🏙 Қала ішінде"), KeyboardButton(text="🛣 Қалааралық (Межгород)")],
         [KeyboardButton(text="📦 Жеткізу (Доставка)"), KeyboardButton(text="🚖 Жүргізуші болу")],
+        [KeyboardButton(text="📍 Менің мекенжайларым")],
         [KeyboardButton(text="📞 Қолдау қызметі (Админге жазу)")],
     ]
     if user_id and await is_driver_registered(user_id):
@@ -560,13 +651,31 @@ async def get_join_link(chat_id: int) -> str:
     return _invite_links[chat_id]
 
 
-async def driver_groups_kb() -> InlineKeyboardMarkup:
-    city_link = await get_join_link(CITY_GROUP_ID)
-    intercity_link = await get_join_link(INTERCITY_GROUP_ID)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏙 Қала ішіндегі топқа қосылу", url=city_link)],
-        [InlineKeyboardButton(text="🛣 Қалааралық топқа қосылу", url=intercity_link)],
-    ])
+GROUP_BUTTONS = (
+    (CITY_GROUP_ID, "🏙 Қала ішіндегі топқа қосылу"),
+    (INTERCITY_GROUP_ID, "🛣 Қалааралық топқа қосылу"),
+)
+GROUP_NAMES = {CITY_GROUP_ID: "🏙 Қала ішіндегі", INTERCITY_GROUP_ID: "🛣 Қалааралық"}
+
+
+async def is_group_member(chat_id: int, user_id: int) -> bool:
+    try:
+        m = await bot.get_chat_member(chat_id, user_id)
+        return m.status in ("member", "administrator", "creator") or (
+            m.status == "restricted" and getattr(m, "is_member", False))
+    except Exception:
+        return False
+
+
+async def driver_groups_kb(user_id: int, joined_now: set | None = None) -> InlineKeyboardMarkup | None:
+    """Кнопки только для тех групп, где водителя ещё нет. Если он уже в обеих, вернёт None."""
+    joined_now = joined_now or set()
+    rows = []
+    for chat_id, title in GROUP_BUTTONS:
+        if chat_id in joined_now or await is_group_member(chat_id, user_id):
+            continue
+        rows.append([InlineKeyboardButton(text=title, url=await get_join_link(chat_id))])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 # ======================= СТАРТ / ОТМЕНА / ПОДДЕРЖКА =======================
@@ -921,11 +1030,15 @@ async def start_driver_reg(message: types.Message, state: FSMContext):
     await state.clear()
     if await is_driver_registered(message.from_user.id):
         try:
-            kb = await driver_groups_kb()
-            await message.answer(
-                "✅ <b>Сіз тіркелген жүргізушісіз!</b> Топтарға өту үшін төмендегі сілтемелерді басыңыз:",
-                reply_markup=kb, parse_mode="HTML",
-            )
+            kb = await driver_groups_kb(message.from_user.id)
+            if kb is None:
+                await message.answer("✅ <b>Сіз тіркелген жүргізушісіз және екі топқа да қосылғансыз!</b>", parse_mode="HTML")
+            else:
+                sent = await message.answer(
+                    "✅ <b>Сіз тіркелген жүргізушісіз!</b> Топтарға өту үшін төмендегі батырмаларды басыңыз:",
+                    reply_markup=kb, parse_mode="HTML",
+                )
+                await db(_set_join_msg, message.from_user.id, sent.message_id)
         except Exception as e:
             logging.error(f"Ошибка получения ссылок: {e}")
             await message.answer("✅ <b>Сіз тіркелген жүргізушісіз!</b> Жұмыс топтарына қосылыңыз.", parse_mode="HTML")
@@ -983,25 +1096,54 @@ async def process_driver_car(message: types.Message, state: FSMContext):
         return
 
     await state.clear()
+    uid = message.from_user.id
+    # У сообщения может быть только одна клавиатура, поэтому: 1) главное меню (убирает «Бас тарту»), 2) кнопки групп
+    await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>", reply_markup=await main_menu(uid), parse_mode="HTML")
     try:
-        kb = await driver_groups_kb()
-        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>\n\nТоптарға қосылыңыз 👇", reply_markup=kb, parse_mode="HTML")
+        kb = await driver_groups_kb(uid)
+        if kb:
+            sent = await message.answer(
+                "👇 <b>Жұмыс топтарына қосылыңыз</b> — тапсырыстар сонда түседі.\n"
+                "Батырманы басып, «Қосылуға өтініш жіберу» дегенді таңдаңыз.",
+                reply_markup=kb, parse_mode="HTML",
+            )
+            await db(_set_join_msg, uid, sent.message_id)
     except Exception as e:
         logging.error(f"Ошибка сгенерировать ссылки: {e}")
-        await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>",
-                             reply_markup=await main_menu(message.from_user.id), parse_mode="HTML")
+        await message.answer("Топтарға қосылу үшін «🚖 Жүргізуші болу» батырмасын басыңыз.")
 
 
 @dp.chat_join_request()
 async def auto_approve_driver(chat_join_request: ChatJoinRequest):
     """Принимает в группы только зарегистрированных водителей."""
+    user_id = chat_join_request.from_user.id
     try:
-        if await is_driver_registered(chat_join_request.from_user.id):
+        if await is_driver_registered(user_id):
             await chat_join_request.approve()
         else:
             await chat_join_request.decline()
+            return
     except Exception as e:
         logging.error(f"Ошибка обработки заявки в группу: {e}")
+        return
+    await refresh_join_message(user_id, chat_join_request.chat.id)
+
+
+async def refresh_join_message(user_id: int, joined_chat_id: int):
+    """После вступления убираем кнопку этой группы из сообщения водителя (или закрываем сообщение совсем)."""
+    try:
+        msg_id = await db(_get_join_msg, user_id)
+        if not msg_id:
+            return
+        kb = await driver_groups_kb(user_id, joined_now={joined_chat_id})
+        name = GROUP_NAMES.get(joined_chat_id, "")
+        if kb is None:
+            text = f"✅ <b>{name} топқа қосылдыңыз!</b>\n\nЕкі топқа да қосылдыңыз. Сәттілік! 🚖"
+        else:
+            text = f"✅ <b>{name} топқа қосылдыңыз!</b>\n\nЕнді екінші топқа да қосылыңыз 👇"
+        await bot.edit_message_text(chat_id=user_id, message_id=msg_id, text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Не удалось обновить сообщение со ссылками у {user_id}: {e}")
 
 
 # ======================= ОБЩЕЕ: ПУБЛИКАЦИЯ ЗАКАЗА В ГРУППУ =======================
@@ -1128,21 +1270,17 @@ async def start_city_order(message: types.Message, state: FSMContext):
     if not await require_client(message, state):
         return
     await state.set_state(OrderCity.from_loc)
-    await message.answer("📍 <b>Қайдан алып кетейік?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+    await send_address_prompt(message, message.from_user.id, "📍 <b>Қайдан алып кетейік?</b>", "f", set_keyboard=True)
 
 
 @fsm.message(OrderCity.from_loc, F.text)
 async def process_city_from(message: types.Message, state: FSMContext):
-    await state.update_data(from_loc=clip(message.text))
-    await state.set_state(OrderCity.to_loc)
-    await message.answer("🏁 <b>Қайда барамыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+    await city_after_from(message, state, message.from_user.id, clip(message.text))
 
 
 @fsm.message(OrderCity.to_loc, F.text)
 async def process_city_to(message: types.Message, state: FSMContext):
-    await state.update_data(to_loc=clip(message.text))
-    await state.set_state(OrderCity.price)
-    await message.answer("💰 <b>Жол ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+    await city_after_to(message, state, clip(message.text))
 
 
 @fsm.message(OrderCity.price, F.text)
@@ -1535,6 +1673,183 @@ async def run_broadcast(recipients, from_chat_id, message_id):
         pass
 
 
+# ======================= СОХРАНЁННЫЕ МЕКЕНЖАЙЛАР (избранные адреса) =======================
+ADDRESS_PRESETS = {"home": "🏠 Үй", "work": "💼 Жұмыс", "school": "🏫 Мектеп", "kinder": "🧸 Балабақша"}
+
+
+def addresses_pick_kb(addresses, step: str) -> InlineKeyboardMarkup:
+    """step: 'f' (откуда) или 't' (куда). Он зашит в callback, чтобы повторное нажатие не попало не на тот шаг."""
+    buttons = [InlineKeyboardButton(text=label, callback_data=f"pickaddr_{step}_{aid}") for aid, label, _ in addresses]
+    return InlineKeyboardMarkup(inline_keyboard=[buttons[i:i + 2] for i in range(0, len(buttons), 2)])
+
+
+async def send_address_prompt(target: types.Message, user_id: int, prompt: str, step: str, set_keyboard: bool):
+    """Вопрос про адрес + кнопки сохранённых адресов (если они есть)."""
+    addresses = await db(_get_addresses, user_id)
+    if not addresses:
+        await target.answer(prompt, reply_markup=cancel_menu(), parse_mode="HTML")
+        return
+    kb = addresses_pick_kb(addresses, step)
+    if set_keyboard:  # у сообщения только одна клавиатура: сначала «Бас тарту» внизу, потом кнопки адресов
+        await target.answer(prompt, reply_markup=cancel_menu(), parse_mode="HTML")
+        await target.answer("⚡ Немесе сақталған мекенжайды таңдаңыз 👇", reply_markup=kb)
+    else:
+        await target.answer(prompt + "\n\n⚡ Немесе сақталған мекенжайды таңдаңыз 👇", reply_markup=kb, parse_mode="HTML")
+
+
+async def city_after_from(target: types.Message, state: FSMContext, user_id: int, from_loc: str):
+    await state.update_data(from_loc=from_loc)
+    await state.set_state(OrderCity.to_loc)
+    await send_address_prompt(target, user_id, "🏁 <b>Қайда барамыз?</b>", "t", set_keyboard=False)
+
+
+async def city_after_to(target: types.Message, state: FSMContext, to_loc: str):
+    await state.update_data(to_loc=to_loc)
+    await state.set_state(OrderCity.price)
+    await target.answer("💰 <b>Жол ақысын қанша ұсынасыз?</b>", reply_markup=cancel_menu(), parse_mode="HTML")
+
+
+@fsm.callback_query(F.data.startswith("pickaddr_"),
+                    StateFilter(OrderCity.from_loc, OrderCity.to_loc))
+async def pick_saved_address(callback_query: types.CallbackQuery, state: FSMContext):
+    _, step, aid = callback_query.data.split("_")
+    current = await state.get_state()
+    expected = OrderCity.from_loc.state if step == "f" else OrderCity.to_loc.state
+    if current != expected:
+        await callback_query.answer("Бұл қадам аяқталған.", show_alert=True)
+        return
+
+    address = await db(_get_address, int(aid), callback_query.from_user.id)
+    if not address:
+        await callback_query.answer("❌ Мекенжай табылмады (жойылған болуы мүмкін).", show_alert=True)
+        return
+    await callback_query.answer()
+
+    title = "📍 <b>Қайдан:</b>" if step == "f" else "🏁 <b>Қайда:</b>"
+    try:
+        await callback_query.message.edit_text(f"{title} {esc(address)}", reply_markup=None, parse_mode="HTML")
+    except Exception:
+        pass
+    if step == "f":
+        await city_after_from(callback_query.message, state, callback_query.from_user.id, address)
+    else:
+        await city_after_to(callback_query.message, state, address)
+
+
+@fsm.callback_query(F.data.startswith("pickaddr_"))
+async def pick_saved_address_stale(callback_query: types.CallbackQuery):
+    await callback_query.answer("Бұл қадам аяқталған.", show_alert=True)
+
+
+async def render_addresses(user_id: int):
+    addresses = await db(_get_addresses, user_id)
+    if not addresses:
+        text = (
+            "📍 <b>Менің мекенжайларым</b>\n\n"
+            "Сақталған мекенжай жоқ. Жиі қолданатын мекенжайларды (үй, жұмыс, мектеп, балабақша) қосыңыз — "
+            "тапсырыс беру кезінде бір басумен таңдайсыз."
+        )
+    else:
+        lines = "\n".join(f"{i}. <b>{esc(label)}</b> — {esc(addr)}" for i, (_, label, addr) in enumerate(addresses, 1))
+        text = f"📍 <b>Менің мекенжайларым</b>\n\n{lines}\n\nЖою үшін 🗑 батырмасын басыңыз."
+    rows = [[InlineKeyboardButton(text=f"🗑 {label}", callback_data=f"addrdel_{aid}")] for aid, label, _ in addresses]
+    if len(addresses) < MAX_SAVED_ADDRESSES:
+        rows.append([InlineKeyboardButton(text="➕ Мекенжай қосу", callback_data="addradd")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(F.text == "📍 Менің мекенжайларым")
+async def my_addresses(message: types.Message, state: FSMContext):
+    await state.clear()
+    if not await require_client(message, state):
+        return
+    text, kb = await render_addresses(message.from_user.id)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "addradd")
+async def address_add_start(callback_query: types.CallbackQuery, state: FSMContext):
+    if len(await db(_get_addresses, callback_query.from_user.id)) >= MAX_SAVED_ADDRESSES:
+        await callback_query.answer(f"Ең көбі {MAX_SAVED_ADDRESSES} мекенжай сақтауға болады. Біреуін жойыңыз.", show_alert=True)
+        return
+    await state.set_state(AddressState.label)
+    await callback_query.answer()
+    await callback_query.message.answer(
+        "➕ <b>Жаңа мекенжай</b>\n\n✍️ Атауын жазыңыз (мысалы: Үй, Жұмыс, Мектеп):",
+        reply_markup=cancel_menu(), parse_mode="HTML",
+    )
+    preset_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=ADDRESS_PRESETS["home"], callback_data="addrpreset_home"),
+         InlineKeyboardButton(text=ADDRESS_PRESETS["work"], callback_data="addrpreset_work")],
+        [InlineKeyboardButton(text=ADDRESS_PRESETS["school"], callback_data="addrpreset_school"),
+         InlineKeyboardButton(text=ADDRESS_PRESETS["kinder"], callback_data="addrpreset_kinder")],
+    ])
+    await callback_query.message.answer("Немесе дайын атауды таңдаңыз 👇", reply_markup=preset_kb)
+
+
+@dp.callback_query(F.data.startswith("addrdel_"))
+async def address_delete(callback_query: types.CallbackQuery):
+    await db(_delete_address, int(callback_query.data.split("_")[1]), callback_query.from_user.id)
+    text, kb = await render_addresses(callback_query.from_user.id)
+    try:
+        await callback_query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback_query.answer("Жойылды")
+
+
+@fsm.callback_query(F.data.startswith("addrpreset_"), StateFilter(AddressState.label))
+async def address_preset(callback_query: types.CallbackQuery, state: FSMContext):
+    label = ADDRESS_PRESETS.get(callback_query.data.split("_")[1])
+    if not label:
+        await callback_query.answer()
+        return
+    await state.update_data(label=label)
+    await state.set_state(AddressState.address)
+    try:
+        await callback_query.message.edit_text(f"✅ Атауы: <b>{label}</b>", reply_markup=None, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback_query.answer()
+    await callback_query.message.answer("📍 Мекенжайды жазыңыз (көше, үй, пәтер / кіреберіс):",
+                                        reply_markup=cancel_menu())
+
+
+@fsm.callback_query(F.data.startswith("addrpreset_"))
+async def address_preset_stale(callback_query: types.CallbackQuery):
+    await callback_query.answer("Бұл қадам аяқталған.", show_alert=True)
+
+
+@fsm.message(AddressState.label, F.text)
+async def address_label(message: types.Message, state: FSMContext):
+    label = clip(message.text, 30)
+    if not label:
+        await message.answer("✍️ Атауын жазыңыз (мысалы: Үй).")
+        return
+    await state.update_data(label=label)
+    await state.set_state(AddressState.address)
+    await message.answer("📍 Мекенжайды жазыңыз (көше, үй, пәтер / кіреберіс):", reply_markup=cancel_menu())
+
+
+@fsm.message(AddressState.address, F.text)
+async def address_save(message: types.Message, state: FSMContext):
+    address = clip(message.text, 150)
+    if len(address) < 3:
+        await message.answer("❌ Мекенжайды толығырақ жазыңыз.")
+        return
+    data = await state.get_data()
+    user_id = message.from_user.id
+    result = await db(_add_address, user_id, data.get("label", "📍"), address)
+    await state.clear()
+    if result is None:
+        await message.answer(f"❌ Ең көбі {MAX_SAVED_ADDRESSES} мекенжай сақтауға болады. Біреуін жойыңыз.",
+                             reply_markup=await main_menu(user_id))
+    else:
+        await message.answer("✅ Мекенжай сақталды!", reply_markup=await main_menu(user_id))
+    text, kb = await render_addresses(user_id)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 # ======================= ЗАПАСНЫЕ ОБРАБОТЧИКИ (подключаются последними) =======================
 @fsm.message(StateFilter("*"))
 async def unexpected_input(message: types.Message, state: FSMContext):
@@ -1614,6 +1929,55 @@ async def expire_orders_loop():
         await asyncio.sleep(30)
 
 
+# ======================= НАПОМИНАНИЕ ВОДИТЕЛЯМ О ВСТУПЛЕНИИ В ГРУППЫ =======================
+async def remind_driver(user_id: int, sent_count: int, old_msg_id):
+    total = len(REMINDER_DELAYS_HOURS)
+    missing = [cid for cid, _ in GROUP_BUTTONS if not await is_group_member(cid, user_id)]
+    if not missing:  # уже в обеих группах, напоминать не нужно
+        await db(_set_reminders_sent, user_id, total)
+        return
+
+    rows = []
+    for cid, title in GROUP_BUTTONS:
+        if cid in missing:
+            rows.append([InlineKeyboardButton(text=title, url=await get_join_link(cid))])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if len(missing) == len(GROUP_BUTTONS):
+        what = "<b>екі топқа да</b> (қала ішіндегі және қалааралық)"
+    else:
+        what = f"<b>{GROUP_NAMES[missing[0]]} топқа</b>"
+    text = (
+        f"⏰ <b>Ескерту!</b>\n\n"
+        f"Сіз әлі жұмыс топтарына қосылмағансыз. Тапсырыстар тек топтарда көрсетіледі, "
+        f"сондықтан {what} қосылуыңыз қажет 👇\n\n"
+        f"Батырманы басып, «Қосылуға өтініш жіберу» дегенді таңдаңыз."
+    )
+
+    try:
+        sent = await bot.send_message(user_id, text, reply_markup=kb, parse_mode="HTML")
+        await db(_set_join_msg, user_id, sent.message_id)  # вступление уберёт кнопку и в этом сообщении
+        if old_msg_id:  # старое сообщение с кнопками больше не нужно
+            await safe_remove_buttons(user_id, old_msg_id)
+        await db(_set_reminders_sent, user_id, sent_count + 1)
+    except TelegramForbiddenError:  # водитель заблокировал бота, больше не беспокоим
+        await db(_set_reminders_sent, user_id, total)
+    except Exception as e:
+        logging.error(f"Не удалось отправить напоминание водителю {user_id}: {e}")
+        await db(_set_reminders_sent, user_id, sent_count + 1)  # чтобы не долбить бесконечно
+
+
+async def reminders_loop():
+    while True:
+        try:
+            for user_id, sent_count, old_msg_id in await db(_get_reminder_candidates):
+                await remind_driver(user_id, sent_count, old_msg_id)
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logging.error(f"Ошибка цикла напоминаний: {e}")
+        await asyncio.sleep(600)  # проверка раз в 10 минут
+
+
 # ======================= ВЕБ-СЕРВЕР И ЗАПУСК =======================
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
@@ -1632,10 +1996,12 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     expire_task = asyncio.create_task(expire_orders_loop())
+    reminder_task = asyncio.create_task(reminders_loop())
     try:
         await dp.start_polling(bot)
     finally:
         expire_task.cancel()
+        reminder_task.cancel()
         await runner.cleanup()
         pool.closeall()
 
