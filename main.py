@@ -42,6 +42,8 @@ COMMISSION_PERCENT = 10      # Процент комиссии от заказа
 BONUS_AMOUNT = 5000          # Бонус новому водителю
 MIN_PRICE = 100              # Минимальная цена заказа (защита от "договорная", "0" и т.п.)
 MAX_ADMIN_AMOUNT = 1_000_000 # Максимум для ручного пополнения
+ORDER_TIMEOUT_MINUTES = 15   # Через сколько минут непринятый заказ закрывается автоматически
+REFUND_ON_CANCEL = False     # Комиссия водителю НЕ возвращается, если клиент отменил УЖЕ принятый заказ
 KASPI_INFO = os.getenv("KASPI_INFO", "+7 775 699 63 09 (Еркебұлан Ә.)")
 
 bot = Bot(token=API_TOKEN)
@@ -129,6 +131,10 @@ def _init_db():
         # Новые колонки: кто принял заказ и когда создан (для учёта и разбора споров)
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_id BIGINT")
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()")
+        # Для отмены заказов: где лежат карточки и сколько удержана комиссия
+        for col in ("group_chat_id BIGINT", "group_message_id BIGINT", "group_text TEXT",
+                    "driver_msg_id BIGINT", "driver_text TEXT", "client_msg_id BIGINT", "commission REAL"):
+            cur.execute(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {col}")
 
         cur.execute('''
             CREATE TABLE IF NOT EXISTS drivers (
@@ -235,6 +241,70 @@ def _set_order_status(order_id, status):
         cur.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
 
 
+_ORDER_FIELDS = {"group_chat_id", "group_message_id", "group_text",
+                 "driver_msg_id", "driver_text", "client_msg_id"}
+
+
+def _update_order(order_id, **fields):
+    """Сохраняет id сообщений/тексты карточек заказа (None пропускается)."""
+    fields = {k: v for k, v in fields.items() if k in _ORDER_FIELDS and v is not None}
+    if not fields:
+        return
+    sets = ", ".join(f"{k} = %s" for k in fields)
+    with db_cursor() as cur:
+        cur.execute(f"UPDATE orders SET {sets} WHERE id = %s", (*fields.values(), order_id))
+
+
+def _cancel_order(order_id, user_id):
+    """Отмена заказа клиентом (только владелец, только пока заказ 'new' или 'accepted').
+    Если заказ уже принят и включён REFUND_ON_CANCEL, комиссия возвращается водителю."""
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT status, driver_id, commission, group_chat_id, group_message_id, group_text, "
+            "driver_msg_id, driver_text FROM orders WHERE id = %s AND user_id = %s FOR UPDATE",
+            (order_id, user_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return {"status": "not_found"}
+        (status, driver_id, commission, group_chat_id, group_message_id,
+         group_text, driver_msg_id, driver_text) = row
+        if status not in ('new', 'accepted'):
+            return {"status": "already", "order_status": status}
+
+        cur.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order_id,))
+
+        refunded, new_balance = False, None
+        commission = float(commission or 0)
+        if status == 'accepted' and driver_id and REFUND_ON_CANCEL and commission > 0:
+            cur.execute(
+                "UPDATE drivers SET balance = COALESCE(balance, 0) + %s WHERE user_id = %s RETURNING balance",
+                (commission, driver_id),
+            )
+            r = cur.fetchone()
+            if r:
+                refunded, new_balance = True, float(r[0])
+
+        return {
+            "status": "ok", "was_accepted": status == 'accepted', "driver_id": driver_id,
+            "commission": commission, "refunded": refunded, "new_balance": new_balance,
+            "group_chat_id": group_chat_id, "group_message_id": group_message_id, "group_text": group_text,
+            "driver_msg_id": driver_msg_id, "driver_text": driver_text,
+        }
+
+
+def _expire_orders():
+    """Закрывает заказы, которые никто не принял за ORDER_TIMEOUT_MINUTES."""
+    with db_cursor() as cur:
+        cur.execute(
+            "UPDATE orders SET status = 'expired' "
+            "WHERE status = 'new' AND created_at < NOW() - (%s * INTERVAL '1 minute') "
+            "RETURNING id, user_id, group_chat_id, group_message_id, group_text, client_msg_id",
+            (ORDER_TIMEOUT_MINUTES,),
+        )
+        return cur.fetchall()
+
+
 def _topup(target_id, amount, bonus=False):
     """Атомарное пополнение: баланс меняется одним SQL-запросом, двойное начисление невозможно."""
     with db_cursor() as cur:
@@ -277,7 +347,7 @@ def _accept_order(order_id, driver_id):
                 "UPDATE orders SET status = 'accepted', driver_id = %s "
                 "WHERE id = %s AND status = 'new' AND user_id <> %s "
                 "RETURNING user_id, order_type, delivery_type, item_info, from_loc, to_loc, "
-                "date_time, seats, price, phone",
+                "date_time, seats, price, phone, client_msg_id",
                 (driver_id, order_id, driver_id),
             )
             order = cur.fetchone()
@@ -286,6 +356,8 @@ def _accept_order(order_id, driver_id):
                 o = cur.fetchone()
                 if o and o[1] == 'new' and o[0] == driver_id:
                     return {"status": "own"}
+                if o and o[1] in ('cancelled', 'expired'):
+                    return {"status": o[1]}
                 return {"status": "taken"}
 
             commission = round(parse_price(order[8]) * COMMISSION_PERCENT / 100)
@@ -298,6 +370,7 @@ def _accept_order(order_id, driver_id):
                 cur.execute("SELECT balance FROM drivers WHERE user_id = %s", (driver_id,))
                 raise _InsufficientBalance(commission, float(cur.fetchone()[0] or 0))
 
+            cur.execute("UPDATE orders SET commission = %s WHERE id = %s", (commission, order_id))
             cur.execute("SELECT full_name, phone FROM clients WHERE user_id = %s", (order[0],))
             client = cur.fetchone()
 
@@ -434,6 +507,27 @@ def phone_request_menu():
         ],
         resize_keyboard=True,
     )
+
+
+def cancel_order_kb(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Тапсырысты жою", callback_data=f"cancelorder_{order_id}")]
+    ])
+
+
+async def safe_edit(chat_id: int, message_id: int, text: str):
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text,
+                                    reply_markup=None, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Не удалось изменить сообщение {message_id} в чате {chat_id}: {e}")
+
+
+async def safe_remove_buttons(chat_id: int, message_id: int):
+    try:
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+    except Exception as e:
+        logging.warning(f"Не удалось убрать кнопки у сообщения {message_id}: {e}")
 
 
 # ======================= ССЫЛКИ НА ГРУППЫ =======================
@@ -900,7 +994,7 @@ async def publish_order(message: types.Message, order_id: int, group_id: int, ca
         [InlineKeyboardButton(text="🚖 Тапсырысты алу", callback_data=f"accept_{order_id}")]
     ])
     try:
-        await bot.send_message(chat_id=group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
+        sent = await bot.send_message(chat_id=group_id, text=card_text, reply_markup=kb, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Не удалось отправить заказ №{order_id} в группу: {e}")
         await db(_set_order_status, order_id, "error")
@@ -911,7 +1005,16 @@ async def publish_order(message: types.Message, order_id: int, group_id: int, ca
         except Exception:
             pass
         return
+    await db(_update_order, order_id, group_chat_id=group_id, group_message_id=sent.message_id, group_text=card_text)
+
     await message.answer(ok_text, reply_markup=await main_menu(message.from_user.id), parse_mode="HTML")
+    status_msg = await message.answer(
+        f"📋 <b>Тапсырыс №{order_id}</b>\n"
+        f"⏳ Егер {ORDER_TIMEOUT_MINUTES} минут ішінде жүргізуші табылмаса, тапсырыс автоматты түрде жойылады.\n\n"
+        f"Тапсырысты жою үшін төмендегі батырманы басыңыз 👇",
+        reply_markup=cancel_order_kb(order_id), parse_mode="HTML",
+    )
+    await db(_update_order, order_id, client_msg_id=status_msg.message_id)
 
 
 async def require_client(message: types.Message, state: FSMContext) -> bool:
@@ -1127,6 +1230,12 @@ async def accept_order(callback_query: types.CallbackQuery):
     if res["status"] == "own":
         await callback_query.answer("❌ Өз тапсырысыңызды ала алмайсыз!", show_alert=True)
         return
+    if res["status"] == "cancelled":
+        await callback_query.answer("❌ Клиент тапсырысты жойды!", show_alert=True)
+        return
+    if res["status"] == "expired":
+        await callback_query.answer("⌛ Тапсырыстың уақыты өтіп кетті!", show_alert=True)
+        return
     if res["status"] == "no_balance":
         await callback_query.answer(
             f"❌ Балансыңыз жеткіліксіз!\nТапсырыс комиссиясы: {res['commission']:.0f} ₸\n"
@@ -1144,7 +1253,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     driver_db = res["driver"]
 
     (_, order_type, delivery_type, item_info, from_loc, to_loc,
-     date_time, seats, price, raw_client_phone) = order
+     date_time, seats, price, raw_client_phone, prev_client_msg_id) = order
 
     clean_client_phone = clean_phone_number(raw_client_phone)
     client_name = client_db[0] if client_db else "Клиент"
@@ -1198,8 +1307,10 @@ async def accept_order(callback_query: types.CallbackQuery):
     wa_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💬 WhatsApp-пен жазу", url=f"https://wa.me/{clean_client_phone}")]
     ])
+    driver_msg_id = None
     try:
-        await bot.send_message(chat_id=driver.id, text=driver_pm_text, reply_markup=wa_kb, parse_mode="HTML")
+        driver_msg = await bot.send_message(chat_id=driver.id, text=driver_pm_text, reply_markup=wa_kb, parse_mode="HTML")
+        driver_msg_id = driver_msg.message_id
     except Exception as e:
         logging.error(f"Ошибка отправки водителю: {e}")
 
@@ -1211,10 +1322,73 @@ async def accept_order(callback_query: types.CallbackQuery):
         f"🚘 <b>Көлігі:</b> {esc(driver_car)}\n\n"
         f"Жүргізуші сізбен жақында хабарласады."
     )
+    # Кнопка отмены переезжает на новое сообщение клиента (со старого убираем)
+    if prev_client_msg_id:
+        await safe_remove_buttons(client_id, prev_client_msg_id)
+    new_client_msg_id = None
     try:
-        await bot.send_message(chat_id=client_id, text=client_msg, parse_mode="HTML")
+        sent_client = await bot.send_message(chat_id=client_id, text=client_msg,
+                                             reply_markup=cancel_order_kb(order_id), parse_mode="HTML")
+        new_client_msg_id = sent_client.message_id
     except Exception as e:
         logging.error(f"Ошибка отправки клиенту: {e}")
+
+    await db(_update_order, order_id, group_text=group_card_text, driver_msg_id=driver_msg_id,
+             driver_text=driver_pm_text, client_msg_id=new_client_msg_id)
+
+
+# ======================= ОТМЕНА ЗАКАЗА КЛИЕНТОМ =======================
+@dp.callback_query(F.data.startswith("cancelorder_"))
+async def client_cancel_order(callback_query: types.CallbackQuery):
+    order_id = int(callback_query.data.split("_")[1])
+    res = await db(_cancel_order, order_id, callback_query.from_user.id)
+
+    if res["status"] == "not_found":
+        await callback_query.answer("❌ Тапсырыс табылмады!", show_alert=True)
+        return
+    if res["status"] == "already":
+        texts = {
+            "cancelled": "Тапсырыс бұрын жойылған.",
+            "expired": f"Тапсырыс {ORDER_TIMEOUT_MINUTES} минуттан кейін автоматты түрде жабылған.",
+        }
+        await callback_query.answer(texts.get(res["order_status"], "Бұл тапсырысты жою мүмкін емес."), show_alert=True)
+        await safe_remove_buttons(callback_query.message.chat.id, callback_query.message.message_id)
+        return
+
+    await callback_query.answer("Тапсырыс жойылды")
+
+    # 1. Сообщение клиента
+    try:
+        await callback_query.message.edit_text(
+            callback_query.message.html_text + "\n\n❌ <b>Сіз тапсырысты жойдыңыз.</b>",
+            reply_markup=None, parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.error(f"Не удалось обновить сообщение клиента: {e}")
+
+    # 2. Карточка в группе
+    if res["group_message_id"] and res["group_text"]:
+        await safe_edit(
+            res["group_chat_id"], res["group_message_id"],
+            f"❌ <b>КЛИЕНТ ТАПСЫРЫСТЫ ЖОЙДЫ №{order_id}</b>\n\n" + res["group_text"],
+        )
+
+    # 3. Карточка и уведомление водителю (если заказ уже был принят)
+    if res["was_accepted"] and res["driver_id"]:
+        if res["driver_msg_id"] and res["driver_text"]:
+            await safe_edit(
+                res["driver_id"], res["driver_msg_id"],
+                f"❌ <b>КЛИЕНТ ТАПСЫРЫСТЫ ЖОЙДЫ №{order_id}</b>\n\n" + res["driver_text"],
+            )
+        notice = f"❌ <b>Клиент №{order_id} тапсырысын жойды.</b>"
+        if res["refunded"]:
+            notice += (
+                f"\n\n💸 Комиссия <b>{res['commission']:.0f} ₸</b> балансыңызға қайтарылды."
+                f"\n💳 <b>Ағымдағы баланс:</b> {res['new_balance']:.0f} ₸"
+            )
+        elif res["commission"] > 0:
+            notice += f"\n\nℹ️ Комиссия <b>{res['commission']:.0f} ₸</b> қайтарылмайды."
+        await notify_driver(res["driver_id"], notice)
 
 
 # ======================= ЗАПАСНЫЕ ОБРАБОТЧИКИ (подключаются последними) =======================
@@ -1265,6 +1439,37 @@ async def on_error(event):
 dp.include_router(fsm)
 
 
+# ======================= АВТООТМЕНА НЕПРИНЯТЫХ ЗАКАЗОВ =======================
+async def process_expired_order(order_id, user_id, group_chat_id, group_message_id, group_text, client_msg_id):
+    if group_message_id and group_text:
+        await safe_edit(
+            group_chat_id, group_message_id,
+            f"⌛ <b>ТАПСЫРЫС №{order_id} ЖОЙЫЛДЫ — {ORDER_TIMEOUT_MINUTES} минут ішінде ешкім қабылдамады</b>\n\n" + group_text,
+        )
+    if client_msg_id:
+        await safe_remove_buttons(user_id, client_msg_id)
+    if group_message_id:  # старые заказы (до обновления) закрываем молча, без сообщений клиентам
+        try:
+            await bot.send_message(
+                user_id,
+                f"⌛ <b>№{order_id} тапсырысыңыз жойылды.</b>\n\n"
+                f"{ORDER_TIMEOUT_MINUTES} минут ішінде ешбір жүргізуші қабылдамады. Қажет болса, жаңа тапсырыс беріңіз.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logging.error(f"Не удалось уведомить клиента {user_id} об автоотмене: {e}")
+
+
+async def expire_orders_loop():
+    while True:
+        try:
+            for row in await db(_expire_orders):
+                await process_expired_order(*row)
+        except Exception as e:
+            logging.error(f"Ошибка автоотмены заказов: {e}")
+        await asyncio.sleep(30)
+
+
 # ======================= ВЕБ-СЕРВЕР И ЗАПУСК =======================
 async def handle_ping(request):
     return web.Response(text="Bot is live!")
@@ -1282,9 +1487,11 @@ async def main():
     await site.start()
 
     await bot.delete_webhook(drop_pending_updates=True)
+    expire_task = asyncio.create_task(expire_orders_loop())
     try:
         await dp.start_polling(bot)
     finally:
+        expire_task.cancel()
         await runner.cleanup()
         pool.closeall()
 
