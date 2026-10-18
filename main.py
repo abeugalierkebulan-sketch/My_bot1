@@ -15,6 +15,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError
 from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardMarkup, KeyboardButton, ChatJoinRequest,
@@ -236,6 +237,17 @@ def _create_order(user_id, order_type, delivery_type=None, item_info=None, from_
         return cur.fetchone()[0]
 
 
+def _get_recipients(audience):
+    with db_cursor() as cur:
+        if audience == "clients":
+            cur.execute("SELECT user_id FROM clients")
+        elif audience == "drivers":
+            cur.execute("SELECT user_id FROM drivers")
+        else:
+            cur.execute("SELECT user_id FROM clients UNION SELECT user_id FROM drivers")
+        return [r[0] for r in cur.fetchall()]
+
+
 def _set_order_status(order_id, status):
     with db_cursor() as cur:
         cur.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
@@ -424,6 +436,10 @@ class DriverRegister(StatesGroup):
 class TopupState(StatesGroup):
     waiting_for_receipt = State()
     waiting_custom_amount = State()
+
+
+class BroadcastState(StatesGroup):
+    waiting_message = State()
 
 
 # ======================= ВАЛИДАЦИЯ =======================
@@ -1389,6 +1405,134 @@ async def client_cancel_order(callback_query: types.CallbackQuery):
         elif res["commission"] > 0:
             notice += f"\n\nℹ️ Комиссия <b>{res['commission']:.0f} ₸</b> қайтарылмайды."
         await notify_driver(res["driver_id"], notice)
+
+
+# ======================= РАССЫЛКА (только админ) =======================
+AUDIENCE_LABELS = {"clients": "👤 Клиенттер", "drivers": "🚖 Жүргізушілер", "all": "👥 Барлығы"}
+_broadcast_tasks: set = set()
+
+
+@dp.message(Command("broadcast"))
+async def broadcast_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=AUDIENCE_LABELS["clients"], callback_data="bc_clients")],
+        [InlineKeyboardButton(text=AUDIENCE_LABELS["drivers"], callback_data="bc_drivers")],
+        [InlineKeyboardButton(text=AUDIENCE_LABELS["all"], callback_data="bc_all")],
+        [InlineKeyboardButton(text="❌ Бас тарту", callback_data="bc_cancel")],
+    ])
+    await message.answer("📢 <b>Рассылка.</b> Кімге жібереміз?", reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.in_({"bc_clients", "bc_drivers", "bc_all"}))
+async def broadcast_choose_audience(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        await callback_query.answer("⛔ Рұқсат жоқ", show_alert=True)
+        return
+    audience = callback_query.data.split("_")[1]
+    await state.set_state(BroadcastState.waiting_message)
+    await state.update_data(audience=audience)
+    await callback_query.message.edit_text(
+        f"📢 Аудитория: <b>{AUDIENCE_LABELS[audience]}</b>\n\n"
+        f"✍️ Енді жіберілетін хабарламаны жазыңыз (мәтін, сурет, видео немесе файл).\n"
+        f"Тоқтату үшін «❌ Бас тарту» батырмасын басыңыз.",
+        parse_mode="HTML",
+    )
+    await callback_query.answer()
+
+
+@dp.callback_query(F.data == "bc_cancel")
+async def broadcast_cancel(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        await callback_query.answer("⛔ Рұқсат жоқ", show_alert=True)
+        return
+    await state.clear()
+    try:
+        await callback_query.message.edit_text("❌ Рассылка тоқтатылды.", reply_markup=None)
+    except Exception:
+        pass
+    await callback_query.answer()
+
+
+@fsm.message(BroadcastState.waiting_message)
+async def broadcast_preview(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    audience = data.get("audience", "all")
+    recipients = await db(_get_recipients, audience)
+    if not recipients:
+        await state.clear()
+        await message.answer("❌ Бұл аудиторияда адам жоқ.")
+        return
+
+    await state.update_data(src_chat_id=message.chat.id, src_message_id=message.message_id)
+    await bot.copy_message(chat_id=message.chat.id, from_chat_id=message.chat.id, message_id=message.message_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Жіберу", callback_data="bc_confirm"),
+         InlineKeyboardButton(text="❌ Бас тарту", callback_data="bc_cancel")],
+    ])
+    await message.answer(
+        f"👆 Хабарлама осылай көрінеді.\n\n"
+        f"👥 Аудитория: <b>{AUDIENCE_LABELS[audience]}</b>\n"
+        f"📨 Алушылар саны: <b>{len(recipients)}</b>\n\nЖіберейік пе?",
+        reply_markup=kb, parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "bc_confirm")
+async def broadcast_confirm(callback_query: types.CallbackQuery, state: FSMContext):
+    if callback_query.from_user.id != ADMIN_ID:
+        await callback_query.answer("⛔ Рұқсат жоқ", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("src_message_id"):
+        await callback_query.answer("Рассылка бұрын жіберілген немесе тоқтатылған.", show_alert=True)
+        return
+    await state.clear()
+
+    recipients = await db(_get_recipients, data.get("audience", "all"))
+    try:
+        await callback_query.message.edit_text(f"🚀 Рассылка басталды: {len(recipients)} адам. Аяқталғанда есеп жіберемін.")
+    except Exception:
+        pass
+    await callback_query.answer()
+
+    task = asyncio.create_task(run_broadcast(recipients, data["src_chat_id"], data["src_message_id"]))
+    _broadcast_tasks.add(task)
+    task.add_done_callback(_broadcast_tasks.discard)
+
+
+async def run_broadcast(recipients, from_chat_id, message_id):
+    sent = blocked = failed = 0
+    for uid in recipients:
+        try:
+            try:
+                await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
+            except TelegramRetryAfter as e:  # упёрлись в лимит Telegram: ждём и повторяем один раз
+                await asyncio.sleep(e.retry_after + 1)
+                await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
+            sent += 1
+        except TelegramForbiddenError:  # пользователь заблокировал бота
+            blocked += 1
+        except Exception as e:
+            failed += 1
+            logging.error(f"Рассылка: не доставлено {uid}: {e}")
+        await asyncio.sleep(0.05)  # ~20 сообщений/сек, безопасно для лимитов Telegram
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"✅ <b>Рассылка аяқталды</b>\n\n"
+            f"📨 Жеткізілді: <b>{sent}</b>\n"
+            f"🚫 Ботты бұғаттаған: <b>{blocked}</b>\n"
+            f"⚠️ Қате: <b>{failed}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 # ======================= ЗАПАСНЫЕ ОБРАБОТЧИКИ (подключаются последними) =======================
