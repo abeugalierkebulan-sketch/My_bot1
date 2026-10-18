@@ -39,7 +39,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Таблица заказов
+    # Таблица заказов (добавлены колонки driver_id и driver_msg_id для отслеживания у водителя)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
@@ -54,7 +54,9 @@ def init_db():
             price TEXT,
             phone TEXT,
             status TEXT,
-            group_msg_id BIGINT
+            group_msg_id BIGINT,
+            driver_id BIGINT,
+            driver_msg_id BIGINT
         )
     ''')
     
@@ -976,7 +978,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     await message.answer("✅ <b>Қалааралық тапсырыс қабылданды!</b>", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
     await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
-# --- ОТМЕНА ЗАКАЗА КЛИЕНТОМ ---
+# --- ОТМЕНА ЗАКАЗА КЛИЕНТОМ (ДО ПРИНЯТИЯ) ---
 @dp.callback_query(F.data.startswith("cancelorder_"))
 async def client_cancel_order(callback_query: types.CallbackQuery):
     try:
@@ -1089,7 +1091,8 @@ async def accept_order(callback_query: types.CallbackQuery):
     cursor.execute("SELECT full_name, phone FROM clients WHERE user_id = %s", (client_id,))
     client_db = cursor.fetchone()
 
-    cursor.execute("UPDATE orders SET status = 'accepted' WHERE id = %s", (order_id,))
+    # Сохраняем ID водителя в заказ
+    cursor.execute("UPDATE orders SET status = 'accepted', driver_id = %s WHERE id = %s", (driver.id, order_id))
     conn.commit()
     cursor.close()
     conn.close()
@@ -1154,7 +1157,14 @@ async def accept_order(callback_query: types.CallbackQuery):
     ])
 
     try:
-        await bot.send_message(chat_id=driver.id, text=driver_pm_text, reply_markup=wa_kb, parse_mode="HTML")
+        sent_driver_msg = await bot.send_message(chat_id=driver.id, text=driver_pm_text, reply_markup=wa_kb, parse_mode="HTML")
+        # Сохраняем driver_msg_id для последующего обновления при отмене
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orders SET driver_msg_id = %s WHERE id = %s", (sent_driver_msg.message_id, order_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
     except Exception as e:
         logging.error(f"Ошибка отправки водителю: {e}")
 
@@ -1186,7 +1196,7 @@ async def client_cancel_trip(callback_query: types.CallbackQuery):
 
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, status FROM orders WHERE id = %s", (order_id,))
+        cursor.execute("SELECT user_id, status, driver_id, driver_msg_id, group_msg_id, order_type, delivery_type FROM orders WHERE id = %s", (order_id,))
         order = cursor.fetchone()
 
         if not order:
@@ -1195,7 +1205,7 @@ async def client_cancel_trip(callback_query: types.CallbackQuery):
             conn.close()
             return
 
-        client_id, status = order[0], order[1]
+        client_id, status, driver_id, driver_msg_id, group_msg_id, order_type, delivery_type = order[0], order[1], order[2], order[3], order[4], order[5], order[6]
 
         if client_id != user_id:
             await callback_query.answer("❌ Бұл сіздің тапсырысыңыз емес!", show_alert=True)
@@ -1214,12 +1224,49 @@ async def client_cancel_trip(callback_query: types.CallbackQuery):
         cursor.close()
         conn.close()
 
+        # 1. Обновляем сообщение у клиента
         try:
             await callback_query.message.edit_text(f"❌ <b>№{order_id} сапарыңыз бас тартылды (отменено).</b>", parse_mode="HTML")
         except Exception:
             await callback_query.message.answer(f"❌ <b>№{order_id} сапарыңыз бас тартылды.</b>", parse_mode="HTML")
 
         await callback_query.answer("Сапар сәтті бас тартылды!")
+
+        # 2. Обновляем сообщение у водителя в ЛС
+        if driver_id:
+            try:
+                if driver_msg_id:
+                    await bot.edit_message_text(
+                        chat_id=driver_id,
+                        message_id=driver_msg_id,
+                        text=f"❌ <b>СІЗ ҚАБЫЛДАҒАН ТАПСЫРЫС №{order_id} КЛИЕНТПЕН БАС ТАРТЫЛДЫ!</b>",
+                        reply_markup=None,
+                        parse_mode="HTML"
+                    )
+                else:
+                    await bot.send_message(chat_id=driver_id, text=f"❌ <b>ВНИМАНИЕ! Клиент отменил сапар №{order_id}!</b>", parse_mode="HTML")
+            except Exception as e:
+                logging.error(f"Не удалось обновить карточку водителя при отмене: {e}")
+
+        # 3. Обновляем карточку в группе
+        if group_msg_id:
+            if order_type == 'delivery':
+                group_id = CITY_GROUP_ID if delivery_type == 'city' else INTERCITY_GROUP_ID
+            elif order_type == 'city':
+                group_id = CITY_GROUP_ID
+            else:
+                group_id = INTERCITY_GROUP_ID
+
+            try:
+                await bot.edit_message_text(
+                    chat_id=group_id,
+                    message_id=group_msg_id,
+                    text=f"❌ <b>ТАПСЫРЫС №{order_id} КЛИЕНТПЕН ЖОЙЫЛДЫ (ОТМЕНЕН)</b>",
+                    reply_markup=None,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.error(f"Не удалось обновить карточку в группе при отмене: {e}")
 
     except Exception as e:
         logging.error(f"Ошибка при отмене поездки клиентом: {e}")
