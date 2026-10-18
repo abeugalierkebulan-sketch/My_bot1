@@ -3,7 +3,6 @@ import logging
 import asyncio
 import re
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -730,7 +729,7 @@ async def process_inter_price(message: types.Message, state: FSMContext):
     await message.answer(f"✅ <b>Тапсырыс №{order_id} қабылданды!</b> Жүргізуші іздестірілуде...", reply_markup=main_menu(message.from_user.id), parse_mode="HTML")
     await message.answer(f"📌 <b>Тапсырыс №{order_id}</b>", reply_markup=cancel_kb, parse_mode="HTML")
 
-# --- ОТМЕНА ДО ПРИНЯТИЯ ---
+# --- ОТМЕНА ДО ПРИНЯТИЯ (Безопасная обработка с удалением) ---
 @dp.callback_query(F.data.startswith("cancelorder_"))
 async def client_cancel_order(callback_query: types.CallbackQuery):
     try:
@@ -785,11 +784,11 @@ async def client_cancel_order(callback_query: types.CallbackQuery):
             try:
                 await bot.delete_message(chat_id=group_id, message_id=group_msg_id)
             except Exception as e:
-                logging.error(f"Не удалось удалить из группы: {e}")
+                logging.error(f"Не удалось удалить из группы (возможно, сообщение уже удалено): {e}")
 
     except Exception as e:
         logging.error(f"Ошибка отмены: {e}")
-        await callback_query.answer("❌ Қате орын алды.", show_alert=True)
+        await callback_query.answer("Тапсырыс жойылды.", show_alert=False)
 
 # --- ПРИНЯТИЕ ВОДИТЕЛЕМ ---
 @dp.callback_query(F.data.startswith("accept_"))
@@ -846,7 +845,7 @@ async def accept_order(callback_query: types.CallbackQuery):
     client_name = client_db[0] if client_db else "Клиент"
 
     driver_name = driver_db[0] if driver_db else driver.full_name
-    driver_phone = driver_db[1] if driver_db else "Көрсетілмеген"
+    driver_phone = driver_db[1] if driver_phone else "Көрсетілмеген"
     clean_driver_phone = clean_phone_number(driver_phone)
     driver_car = driver_db[2] if driver_db else "Көрсетілмеген"
 
