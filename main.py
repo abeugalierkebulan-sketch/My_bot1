@@ -1573,10 +1573,12 @@ async def broadcast_choose_audience(callback_query: types.CallbackQuery, state: 
     await state.set_state(BroadcastState.waiting_message)
     await state.update_data(audience=audience)
     await callback_query.message.edit_text(
-        f"📢 Аудитория: <b>{AUDIENCE_LABELS[audience]}</b>\n\n"
-        f"✍️ Енді жіберілетін хабарламаны жазыңыз (мәтін, сурет, видео немесе файл).\n"
-        f"Тоқтату үшін «❌ Бас тарту» батырмасын басыңыз.",
-        parse_mode="HTML",
+        f"📢 Аудитория: <b>{AUDIENCE_LABELS[audience]}</b>", reply_markup=None, parse_mode="HTML",
+    )
+    await callback_query.message.answer(
+        "✍️ Енді жіберілетін хабарламаны жазыңыз (мәтін, сурет, видео немесе файл).\n"
+        "Тоқтату үшін «❌ Бас тарту» батырмасын басыңыз.",
+        reply_markup=cancel_menu(),
     )
     await callback_query.answer()
 
@@ -1591,6 +1593,7 @@ async def broadcast_cancel(callback_query: types.CallbackQuery, state: FSMContex
         await callback_query.message.edit_text("❌ Рассылка тоқтатылды.", reply_markup=None)
     except Exception:
         pass
+    await callback_query.message.answer("Басты мәзір 👇", reply_markup=await main_menu(callback_query.from_user.id))
     await callback_query.answer()
 
 
@@ -1636,6 +1639,7 @@ async def broadcast_confirm(callback_query: types.CallbackQuery, state: FSMConte
         await callback_query.message.edit_text(f"🚀 Рассылка басталды: {len(recipients)} адам. Аяқталғанда есеп жіберемін.")
     except Exception:
         pass
+    await callback_query.message.answer("Басты мәзір 👇", reply_markup=await main_menu(callback_query.from_user.id))
     await callback_query.answer()
 
     task = asyncio.create_task(run_broadcast(recipients, data["src_chat_id"], data["src_message_id"]))
@@ -1971,7 +1975,11 @@ async def reminders_loop():
     while True:
         try:
             for user_id, sent_count, old_msg_id in await db(_get_reminder_candidates):
-                await remind_driver(user_id, sent_count, old_msg_id)
+                try:
+                    await remind_driver(user_id, sent_count, old_msg_id)
+                except Exception as e:
+                    logging.error(f"Напоминание водителю {user_id} не удалось: {e}")
+                    await db(_set_reminders_sent, user_id, sent_count + 1)  # не зацикливаемся на одном водителе
                 await asyncio.sleep(0.1)
         except Exception as e:
             logging.error(f"Ошибка цикла напоминаний: {e}")
