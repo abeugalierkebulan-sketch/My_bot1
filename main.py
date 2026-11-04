@@ -296,7 +296,15 @@ def _save_driver(user_id, name, phone, car_info):
                 ON CONFLICT (user_id) DO UPDATE
                 SET full_name = EXCLUDED.full_name, phone = EXCLUDED.phone, car_info = EXCLUDED.car_info
             ''', (user_id, name, phone, car_info))
-        return "ok"
+            # Автоматический бонус: начисляется один раз за всё время (флаг has_received_bonus).
+            # Всё в одной транзакции с регистрацией, так что двойное начисление невозможно.
+            cur.execute(
+                "UPDATE drivers SET balance = COALESCE(balance, 0) + %s, has_received_bonus = TRUE "
+                "WHERE user_id = %s AND COALESCE(has_received_bonus, FALSE) = FALSE RETURNING balance",
+                (BONUS_AMOUNT, user_id),
+            )
+            bonus_given = cur.fetchone() is not None
+        return "bonus" if bonus_given else "ok"
     except psycopg2.IntegrityError:
         return "dup"
 
@@ -1098,7 +1106,10 @@ async def process_driver_car(message: types.Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
     # У сообщения может быть только одна клавиатура, поэтому: 1) главное меню (убирает «Бас тарту»), 2) кнопки групп
-    await message.answer("🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>", reply_markup=await main_menu(uid), parse_mode="HTML")
+    welcome = "🎉 <b>Құттықтаймыз! Тіркелдіңіз.</b>"
+    if result == "bonus":
+        welcome += f"\n\n🎁 Балансыңызға <b>{BONUS_AMOUNT} ₸</b> бонус есептелді!\n💰 Ағымдағы баланс: <b>{BONUS_AMOUNT} ₸</b>"
+    await message.answer(welcome, reply_markup=await main_menu(uid), parse_mode="HTML")
     try:
         kb = await driver_groups_kb(uid)
         if kb:
