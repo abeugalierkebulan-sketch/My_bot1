@@ -45,7 +45,8 @@ MAX_SAVED_ADDRESSES = 10          # Сколько адресов клиент �
 BONUS_AMOUNT = 5000          # Бонус новому водителю
 MIN_PRICE = 100              # Минимальная цена заказа (защита от "договорная", "0" и т.п.)
 MAX_ADMIN_AMOUNT = 1_000_000 # Максимум для ручного пополнения
-ORDER_TIMEOUT_MINUTES = 15   # Через сколько минут непринятый заказ закрывается автоматически
+ORDER_TIMEOUT_MINUTES = 15          # Город (и доставка по городу): через сколько минут непринятый заказ закрывается
+INTERCITY_ORDER_TIMEOUT_HOURS = 24  # Межгород (и доставка между городами): через сколько часов
 REMINDER_DELAYS_HOURS = (1, 24)  # Напоминания водителю о вступлении в группы: через 1 час и через 24 часа после регистрации
 REFUND_ON_CANCEL = False     # Комиссия водителю НЕ возвращается, если клиент отменил УЖЕ принятый заказ
 KASPI_INFO = os.getenv("KASPI_INFO", "+7 775 699 63 09 (Еркебұлан Ә.)")
@@ -393,13 +394,17 @@ def _cancel_order(order_id, user_id):
 
 
 def _expire_orders():
-    """Закрывает заказы, которые никто не принял за ORDER_TIMEOUT_MINUTES."""
+    """Закрывает непринятые заказы: город через ORDER_TIMEOUT_MINUTES минут,
+    межгород (и доставка между городами) через INTERCITY_ORDER_TIMEOUT_HOURS часов."""
     with db_cursor() as cur:
         cur.execute(
             "UPDATE orders SET status = 'expired' "
-            "WHERE status = 'new' AND created_at < NOW() - (%s * INTERVAL '1 minute') "
-            "RETURNING id, user_id, group_chat_id, group_message_id, group_text, client_msg_id",
-            (ORDER_TIMEOUT_MINUTES,),
+            "WHERE status = 'new' AND created_at < NOW() - ("
+            "  CASE WHEN order_type = 'intercity' OR (order_type = 'delivery' AND delivery_type = 'intercity') "
+            "       THEN %s ELSE %s END * INTERVAL '1 minute') "
+            "RETURNING id, user_id, group_chat_id, group_message_id, group_text, client_msg_id, "
+            "order_type, delivery_type",
+            (INTERCITY_ORDER_TIMEOUT_HOURS * 60, ORDER_TIMEOUT_MINUTES),
         )
         return cur.fetchall()
 
@@ -547,6 +552,10 @@ def validate_phone(raw_phone: str) -> str | None:
 def clean_phone_number(raw_phone: str) -> str:
     phone = validate_phone(raw_phone)
     return phone if phone else ''.join(filter(str.isdigit, str(raw_phone)))
+
+
+def order_timeout_label(intercity: bool) -> str:
+    return f"{INTERCITY_ORDER_TIMEOUT_HOURS} сағат" if intercity else f"{ORDER_TIMEOUT_MINUTES} минут"
 
 
 def commission_percent(order_type, delivery_type=None) -> int:
@@ -1179,7 +1188,7 @@ async def publish_order(message: types.Message, order_id: int, group_id: int, ca
     await message.answer(ok_text, reply_markup=await main_menu(message.from_user.id), parse_mode="HTML")
     status_msg = await message.answer(
         f"📋 <b>Тапсырыс №{order_id}</b>\n"
-        f"⏳ Егер {ORDER_TIMEOUT_MINUTES} минут ішінде жүргізуші табылмаса, тапсырыс автоматты түрде жойылады.\n\n"
+        f"⏳ Егер {order_timeout_label(group_id == INTERCITY_GROUP_ID)} ішінде жүргізуші табылмаса, тапсырыс автоматты түрде жойылады.\n\n"
         f"Тапсырысты жою үшін төмендегі батырманы басыңыз 👇",
         reply_markup=cancel_order_kb(order_id), parse_mode="HTML",
     )
@@ -1514,7 +1523,7 @@ async def client_cancel_order(callback_query: types.CallbackQuery):
     if res["status"] == "already":
         texts = {
             "cancelled": "Тапсырыс бұрын жойылған.",
-            "expired": f"Тапсырыс {ORDER_TIMEOUT_MINUTES} минуттан кейін автоматты түрде жабылған.",
+            "expired": "Тапсырыс уақыты өткендіктен автоматты түрде жабылған.",
         }
         await callback_query.answer(texts.get(res["order_status"], "Бұл тапсырысты жою мүмкін емес."), show_alert=True)
         await safe_remove_buttons(callback_query.message.chat.id, callback_query.message.message_id)
@@ -1914,11 +1923,14 @@ dp.include_router(fsm)
 
 
 # ======================= АВТООТМЕНА НЕПРИНЯТЫХ ЗАКАЗОВ =======================
-async def process_expired_order(order_id, user_id, group_chat_id, group_message_id, group_text, client_msg_id):
+async def process_expired_order(order_id, user_id, group_chat_id, group_message_id, group_text, client_msg_id,
+                                order_type=None, delivery_type=None):
+    intercity = order_type == 'intercity' or (order_type == 'delivery' and delivery_type == 'intercity')
+    timeout_text = order_timeout_label(intercity)
     if group_message_id and group_text:
         await safe_edit(
             group_chat_id, group_message_id,
-            f"⌛ <b>ТАПСЫРЫС №{order_id} ЖОЙЫЛДЫ — {ORDER_TIMEOUT_MINUTES} минут ішінде ешкім қабылдамады</b>\n\n" + group_text,
+            f"⌛ <b>ТАПСЫРЫС №{order_id} ЖОЙЫЛДЫ — {timeout_text} ішінде ешкім қабылдамады</b>\n\n" + group_text,
         )
     if client_msg_id:
         await safe_remove_buttons(user_id, client_msg_id)
@@ -1927,7 +1939,7 @@ async def process_expired_order(order_id, user_id, group_chat_id, group_message_
             await bot.send_message(
                 user_id,
                 f"⌛ <b>№{order_id} тапсырысыңыз жойылды.</b>\n\n"
-                f"{ORDER_TIMEOUT_MINUTES} минут ішінде ешбір жүргізуші қабылдамады. Қажет болса, жаңа тапсырыс беріңіз.",
+                f"{timeout_text} ішінде ешбір жүргізуші қабылдамады. Қажет болса, жаңа тапсырыс беріңіз.",
                 parse_mode="HTML",
             )
         except Exception as e:
